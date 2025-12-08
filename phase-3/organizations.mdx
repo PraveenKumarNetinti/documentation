@@ -509,6 +509,10 @@ class OrganizationSettings(BaseModel):
         self.save(update_fields=['custom_settings'])
 ```
 
+<Note>
+**Custom Managers**: These provide reusable query methods like `for_user()` and `is_member()` that encapsulate common business logic and make your code more readable.
+</Note>
+
 ### `apps/organizations/managers.py`
 
 ```python
