@@ -407,6 +407,10 @@ class WebhookService:
             delivery.status = 'failed'
             webhook.increment_stats(success=False)
 
+<Info>
+**Exponential Backoff**: Retries use exponential backoff to avoid overwhelming failing endpoints. With 60s base delay: 1st retry after 60s, 2nd after 120s, 3rd after 240s.
+</Info>
+
             # Schedule retry
             if delivery.can_retry:
                 delivery.attempt += 1
