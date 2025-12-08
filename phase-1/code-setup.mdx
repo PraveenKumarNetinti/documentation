@@ -911,20 +911,22 @@ logs/
 
 ### `pytest.ini`
 
+Pytest configuration for running tests.
+
 ```ini
 [pytest]
-DJANGO_SETTINGS_MODULE = config.settings.test
-python_files = tests.py test_*.py *_tests.py
-python_classes = Test*
-python_functions = test_*
+DJANGO_SETTINGS_MODULE = config.settings.test  # Use test settings
+python_files = tests.py test_*.py *_tests.py  # Test file patterns
+python_classes = Test*  # Test class patterns
+python_functions = test_*  # Test function patterns
 addopts = 
-    --reuse-db
-    --nomigrations
-    --cov=apps
-    --cov-report=html
-    --cov-report=term-missing
-    --verbose
-testpaths = tests
+    --reuse-db  # Reuse database between test runs (faster)
+    --nomigrations  # Skip migrations (faster)
+    --cov=apps  # Measure code coverage for apps/
+    --cov-report=html  # Generate HTML coverage report
+    --cov-report=term-missing  # Show missing lines in terminal
+    --verbose  # Verbose output
+testpaths = tests  # Where to find tests
 ```
 
 ### `setup.cfg`
