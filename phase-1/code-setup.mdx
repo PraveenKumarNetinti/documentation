@@ -524,44 +524,44 @@ EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')  # SMTP username
 EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')  # SMTP password
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='noreply@platform.com')  # Default sender
 
-# Logging
+# Logging - Configure application logging
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
     'formatters': {
-        'verbose': {
+        'verbose': {  # Detailed log format
             'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
             'style': '{',
         },
-        'simple': {
+        'simple': {  # Simple log format
             'format': '{levelname} {message}',
             'style': '{',
         },
     },
     'handlers': {
-        'console': {
+        'console': {  # Log to console/stdout
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
         },
-        'file': {
+        'file': {  # Log to rotating file
             'class': 'logging.handlers.RotatingFileHandler',
             'filename': BASE_DIR / 'logs' / 'django.log',
-            'maxBytes': 1024 * 1024 * 15,  # 15MB
-            'backupCount': 10,
+            'maxBytes': 1024 * 1024 * 15,  # 15MB per file
+            'backupCount': 10,  # Keep 10 backup files
             'formatter': 'verbose',
         },
     },
-    'root': {
+    'root': {  # Root logger configuration
         'handlers': ['console', 'file'],
         'level': 'INFO',
     },
     'loggers': {
-        'django': {
+        'django': {  # Django framework logs
             'handlers': ['console', 'file'],
             'level': 'INFO',
             'propagate': False,
         },
-        'apps': {
+        'apps': {  # Application logs
             'handlers': ['console', 'file'],
             'level': 'DEBUG',
             'propagate': False,
@@ -569,10 +569,10 @@ LOGGING = {
     },
 }
 
-# Custom settings
-DOMAIN = env('DOMAIN', default='localhost:8000')
-INVITATION_EXPIRY_DAYS = 7
-MAGIC_LINK_EXPIRY_MINUTES = 15
+# Custom settings - Application-specific configuration
+DOMAIN = env('DOMAIN', default='localhost:8000')  # Application domain
+INVITATION_EXPIRY_DAYS = 7  # Invitations expire after 7 days
+MAGIC_LINK_EXPIRY_MINUTES = 15  # Magic links expire after 15 minutes
 ```
 
 ### `config/settings/development.py`
