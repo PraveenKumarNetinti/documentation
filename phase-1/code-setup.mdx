@@ -178,15 +178,17 @@ django-permissions-policy==4.19.0  # Permissions-Policy headers
 
 ### `requirements/test.txt`
 
-```txt
--r base.txt
+Minimal testing dependencies for CI/CD pipelines.
 
-pytest==7.4.3
-pytest-django==4.7.0
-pytest-cov==4.1.0
-factory-boy==3.3.0
-faker==21.0.0
-freezegun==1.4.0
+```txt
+-r base.txt  # Include all base requirements
+
+pytest==7.4.3  # Testing framework
+pytest-django==4.7.0  # Django integration
+pytest-cov==4.1.0  # Coverage reports
+factory-boy==3.3.0  # Test fixtures
+faker==21.0.0  # Fake data generation
+freezegun==1.4.0  # Mock datetime
 ```
 
 ---
