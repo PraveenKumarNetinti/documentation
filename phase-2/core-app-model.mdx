@@ -430,6 +430,10 @@ class RequestLoggingMiddleware(MiddlewareMixin):
         return response
 ```
 
+<Info>
+Permission classes control access to API endpoints. They're checked before views execute, providing a security layer.
+</Info>
+
 ### `apps/core/permissions.py`
 
 ```python
