@@ -844,6 +844,10 @@ class EmailVerificationService:
 
 ## Authentication Tasks (Celery)
 
+<Info>
+Celery tasks handle email sending asynchronously, preventing API requests from blocking while emails are sent.
+</Info>
+
 ### `apps/authentication/tasks.py`
 
 ```python
