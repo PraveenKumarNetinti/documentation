@@ -201,11 +201,13 @@ Never commit your `.env` file to version control. Always use `.env.example` as a
 
 ### `.env.example`
 
+Template for environment variables. Copy to `.env` and fill in your values.
+
 ```bash
 # Environment
-DJANGO_SETTINGS_MODULE=config.settings.development
-DEBUG=True
-SECRET_KEY=your-secret-key-here-change-in-production
+DJANGO_SETTINGS_MODULE=config.settings.development  # Which settings file to use
+DEBUG=True  # Enable debug mode (never True in production)
+SECRET_KEY=your-secret-key-here-change-in-production  # Django secret key for cryptographic signing
 
 # Database
 DATABASE_URL=postgresql://user:password@localhost:5432/saas_platform
