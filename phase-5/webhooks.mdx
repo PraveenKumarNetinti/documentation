@@ -4,7 +4,15 @@ description: 'Continuing with a**Webhooks System**.'
 sidebarTitle: 'Webhooks System'
 ---
 
+<Info>
+**Webhooks System**: Webhooks allow your application to send real-time event notifications to external services. They include automatic retries, delivery tracking, and HMAC signature verification for security.
+</Info>
+
 ### `apps/webhooks/apps.py`
+
+<Note>
+**Event-Driven Architecture**: Webhooks enable event-driven integrations. When something happens in your app (user created, payment received), registered webhooks are automatically notified.
+</Note>
 
 ```python
 from django.apps import AppConfig
