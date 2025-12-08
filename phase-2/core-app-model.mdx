@@ -1028,6 +1028,10 @@ class AuthSession(BaseModel):
         return not self.is_revoked and not self.is_expired
 
 
+<Note>
+**Token Rotation**: Refresh tokens are rotated on each use and tracked by family ID to detect token reuse attacks.
+</Note>
+
 class RefreshToken(BaseModel):
     """
     Store refresh tokens for JWT rotation.
