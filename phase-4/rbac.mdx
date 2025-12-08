@@ -1100,6 +1100,10 @@ class PermissionService:
     Service for checking and managing permissions.
     """
 
+<Info>
+**Permission Resolution**: The system collects permissions from all active roles assigned to a user, including inherited permissions, and caches the result for fast lookups.
+</Info>
+
     @staticmethod
     def get_user_permissions(
         user: User,
