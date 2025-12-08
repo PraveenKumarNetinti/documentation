@@ -4,7 +4,15 @@ description: '**RBAC (Role-Based Access Control)** system with custom roles and 
 sidebarTitle: "RBAC System"
 ---
 
+<Info>
+**RBAC (Role-Based Access Control)** provides fine-grained permissions management. It supports system roles (owner, admin, member, viewer) and custom organization-specific roles with permission inheritance.
+</Info>
+
 ## RBAC App Structure
+
+<Note>
+**Permission Format**: Permissions follow the pattern `resource.action` (e.g., `members.create`, `billing.manage`). This makes them intuitive and easy to manage in the UI.
+</Note>
 
 ```
 apps/rbac/
