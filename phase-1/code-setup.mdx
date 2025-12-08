@@ -516,13 +516,13 @@ SESSION_ENGINE = 'django.contrib.sessions.backends.cache'  # Use cache for sessi
 SESSION_CACHE_ALIAS = 'sessions'  # Use 'sessions' cache
 
 # Email Configuration
-EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
-EMAIL_HOST = env('EMAIL_HOST', default='localhost')
-EMAIL_PORT = env.int('EMAIL_PORT', default=25)
-EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=False)
-EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
-EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
-DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='noreply@platform.com')
+EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')  # Email backend (console for dev)
+EMAIL_HOST = env('EMAIL_HOST', default='localhost')  # SMTP server
+EMAIL_PORT = env.int('EMAIL_PORT', default=25)  # SMTP port
+EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=False)  # Use TLS encryption
+EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')  # SMTP username
+EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')  # SMTP password
+DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='noreply@platform.com')  # Default sender
 
 # Logging
 LOGGING = {
