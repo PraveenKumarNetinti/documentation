@@ -4,6 +4,10 @@ description: "Now I'll build the core foundation models, custom user authenticat
 sidebarTitle: "Core App"
 ---
 
+<Info>
+The core app provides reusable base models, utilities, and middleware that all other apps will use. Think of it as your application's foundation.
+</Info>
+
 ## Apps Structure for Phase 2
 
 ```
@@ -58,6 +62,10 @@ class CoreConfig(AppConfig):
         """Initialize app when Django starts."""
         pass
 ```
+
+<Note>
+**Base Models**: These abstract models provide common functionality (UUID IDs, timestamps, soft deletes) that all other models inherit.
+</Note>
 
 ### `apps/core/models.py`
 
@@ -294,6 +302,10 @@ class MetadataMixin(models.Model):
         return self.metadata.get(key, default)
 ```
 
+<Warning>
+**Tenant Context Middleware**: This is critical for multi-tenancy. It sets PostgreSQL session variables that enforce Row-Level Security policies.
+</Warning>
+
 ### `apps/core/middleware.py`
 
 ```python
@@ -418,6 +430,10 @@ class RequestLoggingMiddleware(MiddlewareMixin):
         return response
 ```
 
+<Info>
+Permission classes control access to API endpoints. They're checked before views execute, providing a security layer.
+</Info>
+
 ### `apps/core/permissions.py`
 
 ```python
@@ -501,6 +517,10 @@ class IsOwnerOrReadOnly(permissions.BasePermission):
         # Write permissions only for owner
         return obj.created_by == request.user if hasattr(obj, 'created_by') else False
 ```
+
+<Note>
+Custom exception handling provides consistent error responses across your API and makes debugging easier with request IDs.
+</Note>
 
 ### `apps/core/exceptions.py`
 
@@ -809,6 +829,10 @@ def validate_url_safe_string(value):
 
 ## Authentication App Implementation
 
+<Info>
+The authentication app handles all user identity, session management, and authentication strategies (password, magic link, OAuth).
+</Info>
+
 ### `apps/authentication/apps.py`
 
 ```python
@@ -839,6 +863,10 @@ from apps.core.models import BaseModel
 from apps.core.utils import generate_random_token, generate_secure_hash
 from .managers import UserManager
 
+
+<Warning>
+**Custom User Model**: This must be set before your first migration. Changing it later requires complex data migrations.
+</Warning>
 
 class User(AbstractBaseUser, PermissionsMixin, BaseModel):
     """
@@ -999,6 +1027,10 @@ class AuthSession(BaseModel):
         """Check if session is still valid."""
         return not self.is_revoked and not self.is_expired
 
+
+<Note>
+**Token Rotation**: Refresh tokens are rotated on each use and tracked by family ID to detect token reuse attacks.
+</Note>
 
 class RefreshToken(BaseModel):
     """
@@ -1188,7 +1220,9 @@ class UserManager(BaseUserManager):
 
 ---
 
-**Phase 2 Part 1 Complete!**
+<Info>
+**Phase 2 Part 1 Complete!** You now have the core foundation with base models, middleware, permissions, and a custom user model ready for authentication.
+</Info>
 
 This covers:
 

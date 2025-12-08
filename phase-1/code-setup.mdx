@@ -6,6 +6,10 @@ sidebarTitle: "Core setup"
 
 ## Phase 1 Overview
 
+<Info>
+Phase 1 establishes the foundation for your entire application. Take time to get this right—it will save countless hours later.
+</Info>
+
 **What we'll build:**
 
 1. Project structure setup
@@ -183,6 +187,10 @@ freezegun==1.4.0
 
 ## Configuration Files
 
+<Warning>
+Never commit your `.env` file to version control. Always use `.env.example` as a template and keep secrets secure.
+</Warning>
+
 ### `.env.example`
 
 ```bash
@@ -246,7 +254,10 @@ env = environ.Env(
 )
 environ.Env.read_env(os.path.join(BASE_DIR, '.env'))
 
-# SECURITY WARNING: keep the secret key used in production secret!
+<Warning>
+**SECURITY WARNING**: Keep the secret key secure! Generate a strong random key for production and never share it.
+</Warning>
+
 SECRET_KEY = env('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -341,6 +352,10 @@ DATABASES = {
     'default': env.db('DATABASE_URL', default='postgresql://localhost/saas_platform')
 }
 
+<Note>
+**Custom User Model**: Set this before running your first migration. Changing it later is extremely difficult.
+</Note>
+
 # Custom User Model
 AUTH_USER_MODEL = 'authentication.User'
 
@@ -404,6 +419,10 @@ REST_FRAMEWORK = {
     'EXCEPTION_HANDLER': 'apps.core.exceptions.custom_exception_handler',
 }
 
+<Info>
+**JWT Configuration**: Short-lived access tokens (15 min) with refresh token rotation provide security while maintaining good UX.
+</Info>
+
 # JWT Settings
 from datetime import timedelta
 
@@ -435,6 +454,10 @@ SPECTACULAR_SETTINGS = {
 # CORS
 CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[])
 CORS_ALLOW_CREDENTIALS = True
+
+<Note>
+**Celery** handles asynchronous tasks like sending emails, processing webhooks, and running scheduled jobs.
+</Note>
 
 # Celery Configuration
 CELERY_BROKER_URL = env('CELERY_BROKER_URL', default='redis://localhost:6379/1')
@@ -567,6 +590,10 @@ SECURE_SSL_REDIRECT = False
 SESSION_COOKIE_SECURE = False
 CSRF_COOKIE_SECURE = False
 ```
+
+<Warning>
+**Production Settings**: These security settings are critical. Never run production with DEBUG=True or without HTTPS.
+</Warning>
 
 ### `config/settings/production.py`
 
@@ -931,7 +958,11 @@ if __name__ == '__main__':
 
 ## Next Steps
 
-Phase 1 is complete! This provides:
+<Info>
+**Phase 1 Complete!** You now have a solid foundation with environment-based configuration, security settings, and all required packages.
+</Info>
+
+This provides:
 
 - ✅ Complete project structure
 - ✅ Environment-based settings (dev/prod/test)

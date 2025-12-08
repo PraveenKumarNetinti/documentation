@@ -6,6 +6,10 @@ sidebarTitle: "Authentication Serializers"
 
 ## Authentication Serializers
 
+<Info>
+Serializers handle data validation, transformation, and provide a clean API interface for authentication operations.
+</Info>
+
 ### `apps/authentication/serializers.py`
 
 ```python
@@ -333,6 +337,10 @@ class LogoutAllSerializer(serializers.Serializer):
 
 ## Authentication Services
 
+<Note>
+Services contain business logic separated from views. This makes code more testable and reusable across different interfaces (API, CLI, etc.).
+</Note>
+
 ### `apps/authentication/services.py`
 
 ```python
@@ -605,6 +613,10 @@ class MagicLinkService:
     Service for handling magic link authentication.
     """
 
+<Warning>
+**Security Note**: Always return success even if the email doesn't exist to prevent email enumeration attacks.
+</Warning>
+
     @staticmethod
     def request_magic_link(email: str, ip_address: Optional[str] = None) -> bool:
         """
@@ -831,6 +843,10 @@ class EmailVerificationService:
 ---
 
 ## Authentication Tasks (Celery)
+
+<Info>
+Celery tasks handle email sending asynchronously, preventing API requests from blocking while emails are sent.
+</Info>
 
 ### `apps/authentication/tasks.py`
 
@@ -1084,6 +1100,10 @@ def cleanup_expired_sessions():
 ---
 
 ## Authentication Views
+
+<Note>
+Views are thin controllers that handle HTTP requests/responses. Business logic lives in services for better separation of concerns.
+</Note>
 
 ### `apps/authentication/views.py`
 
@@ -2045,7 +2065,9 @@ class MagicLinkAdmin(admin.ModelAdmin):
 
 ---
 
-## Phase 2 Part 2 Complete!
+<Info>
+**Phase 2 Part 2 Complete!** You now have a fully functional authentication system with multiple strategies, session management, and email verification.
+</Info>
 
 This covers:
 - ✅ All authentication serializers
