@@ -38,6 +38,10 @@ from apps.organizations.models import Organization
 from apps.authentication.models import User
 
 
+<Warning>
+**Secret Management**: Each webhook has a unique secret key used to sign payloads with HMAC-SHA256. Recipients verify signatures to ensure requests are authentic and haven't been tampered with.
+</Warning>
+
 class Webhook(BaseModel):
     """
     Webhook endpoint configuration.
