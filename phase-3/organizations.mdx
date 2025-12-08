@@ -57,6 +57,10 @@ class OrganizationsConfig(AppConfig):
         import apps.organizations.signals  # noqa
 ```
 
+<Note>
+**Organizations Model**: This is the core tenant entity. Each organization has its own isolated data, members, teams, and billing. The slug field provides user-friendly URLs.
+</Note>
+
 ### `apps/organizations/models.py`
 
 ```python
