@@ -339,27 +339,27 @@ MIDDLEWARE = [
     'apps.audit.middleware.AuditMiddleware',  # Log all requests for audit
 ]
 
-ROOT_URLCONF = 'config.urls'
+ROOT_URLCONF = 'config.urls'  # Main URL configuration
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates'],
-        'APP_DIRS': True,
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',  # Template engine
+        'DIRS': [BASE_DIR / 'templates'],  # Custom template directories
+        'APP_DIRS': True,  # Look for templates in app directories
         'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.debug',
-                'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
+            'context_processors': [  # Variables available in all templates
+                'django.template.context_processors.debug',  # Debug info
+                'django.template.context_processors.request',  # Request object
+                'django.contrib.auth.context_processors.auth',  # User object
+                'django.contrib.messages.context_processors.messages',  # Messages
             ],
         },
     },
 ]
 
-WSGI_APPLICATION = 'config.wsgi.application'
+WSGI_APPLICATION = 'config.wsgi.application'  # WSGI entry point
 
-# Database
+# Database - PostgreSQL connection from environment variable
 DATABASES = {
     'default': env.db('DATABASE_URL', default='postgresql://localhost/saas_platform')
 }
