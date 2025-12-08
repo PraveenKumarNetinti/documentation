@@ -17,8 +17,21 @@
             "group": "Getting started",
             "pages": [
               "index",
-              "quickstart",
-              "development"
+              "folder-structure",
+              "endpoints"
+            ]
+          },
+          {
+            "group": "Phase-1",
+            "pages": [
+              "phase-1/index"
+            ]
+          },
+          {
+            "group": "Phase-2",
+            "pages": [
+              "phase-2/part-1",
+              "phase-2/part-2"
             ]
           }
         ]
