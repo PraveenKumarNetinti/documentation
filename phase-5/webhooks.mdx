@@ -86,6 +86,10 @@ class Webhook(BaseModel):
         help_text=_('Request timeout in seconds')
     )
     
+<Note>
+**Automatic Retries**: Failed webhook deliveries are automatically retried with exponential backoff (60s, 120s, 240s). This handles temporary network issues or endpoint downtime gracefully.
+</Note>
+
     # Retry configuration
     max_retries = models.IntegerField(default=3)
     retry_delay = models.IntegerField(
