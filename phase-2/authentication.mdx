@@ -337,6 +337,10 @@ class LogoutAllSerializer(serializers.Serializer):
 
 ## Authentication Services
 
+<Note>
+Services contain business logic separated from views. This makes code more testable and reusable across different interfaces (API, CLI, etc.).
+</Note>
+
 ### `apps/authentication/services.py`
 
 ```python
