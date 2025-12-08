@@ -613,6 +613,10 @@ class MagicLinkService:
     Service for handling magic link authentication.
     """
 
+<Warning>
+**Security Note**: Always return success even if the email doesn't exist to prevent email enumeration attacks.
+</Warning>
+
     @staticmethod
     def request_magic_link(email: str, ip_address: Optional[str] = None) -> bool:
         """
