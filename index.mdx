@@ -408,11 +408,13 @@ Tokens are designed with security best practices: short-lived access tokens (15 
 - Refresh token stored securely (keychain/keystore)
 - Token rotation on refresh (detect reuse attacks)
 
-**Logout Everywhere**:
+<Note>
+**Logout Everywhere** feature for security:
 - Increment user's token_version in DB
 - Include version in JWT claims
 - Validate version on each request
 - Clear all sessions from Redis
+</Note>
 
 ### Authorization Service Design
 
