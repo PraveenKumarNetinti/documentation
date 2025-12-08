@@ -827,13 +827,15 @@ if settings.DEBUG:
 
 ### `config/wsgi.py`
 
+WSGI entry point for production servers (Gunicorn, uWSGI).
+
 ```python
 import os
 from django.core.wsgi import get_wsgi_application
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.production')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.production')  # Default to production settings
 
-application = get_wsgi_application()
+application = get_wsgi_application()  # Create WSGI application
 ```
 
 ### `config/asgi.py`
