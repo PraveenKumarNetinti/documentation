@@ -484,16 +484,16 @@ CELERY_TASK_TIME_LIMIT = 30 * 60  # Kill tasks after 30 minutes
 # Celery Beat - Periodic task scheduler
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'  # Store schedule in DB
 
-# Cache
+# Cache - Redis for caching
 CACHES = {
-    'default': {
+    'default': {  # General purpose cache
         'BACKEND': 'django_redis.cache.RedisCache',
         'LOCATION': env('REDIS_URL', default='redis://localhost:6379/0'),
         'OPTIONS': {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
         }
     },
-    'permissions': {
+    'permissions': {  # Cache for permission checks
         'BACKEND': 'django_redis.cache.RedisCache',
         'LOCATION': env('REDIS_URL', default='redis://localhost:6379/0'),
         'TIMEOUT': 300,  # 5 minutes
@@ -501,7 +501,7 @@ CACHES = {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
         }
     },
-    'sessions': {
+    'sessions': {  # Cache for user sessions
         'BACKEND': 'django_redis.cache.RedisCache',
         'LOCATION': env('REDIS_URL', default='redis://localhost:6379/0'),
         'TIMEOUT': 86400,  # 24 hours
@@ -511,9 +511,9 @@ CACHES = {
     }
 }
 
-# Session
-SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
-SESSION_CACHE_ALIAS = 'sessions'
+# Session - Store sessions in Redis cache
+SESSION_ENGINE = 'django.contrib.sessions.backends.cache'  # Use cache for sessions
+SESSION_CACHE_ALIAS = 'sessions'  # Use 'sessions' cache
 
 # Email Configuration
 EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
