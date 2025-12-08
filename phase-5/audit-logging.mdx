@@ -1,0 +1,1279 @@
+---
+title: 'Audit Logging System'
+description: 'Now I'll build the **Audit Logging**'
+---
+
+### `apps/audit/apps.py`
+
+```python
+from django.apps import AppConfig
+
+
+class AuditConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.audit'
+    verbose_name = 'Audit Logging'
+
+    def ready(self):
+        """Import signals when app is ready."""
+        import apps.audit.signals  # noqa
+```
+
+### `apps/audit/models.py`
+
+```python
+"""
+Audit logging models.
+"""
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+from apps.core.models import BaseModel
+from apps.organizations.models import Organization
+from apps.authentication.models import User
+from .managers import AuditLogManager
+
+
+class AuditLog(BaseModel):
+    """
+    Immutable audit log for tracking all actions.
+    """
+    ACTION_CATEGORIES = [
+        ('auth', 'Authentication'),
+        ('organization', 'Organization'),
+        ('member', 'Member'),
+        ('team', 'Team'),
+        ('invitation', 'Invitation'),
+        ('role', 'Role'),
+        ('billing', 'Billing'),
+        ('product', 'Product'),
+        ('settings', 'Settings'),
+        ('data', 'Data'),
+        ('system', 'System'),
+    ]
+
+    SEVERITY_CHOICES = [
+        ('info', 'Info'),
+        ('warning', 'Warning'),
+        ('error', 'Error'),
+        ('critical', 'Critical'),
+    ]
+
+    # Organization context
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='audit_logs',
+        db_index=True
+    )
+
+    # Actor (who performed the action)
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='audit_logs_created'
+    )
+    actor_email = models.EmailField(
+        blank=True,
+        help_text=_('Preserved email in case user is deleted')
+    )
+    actor_type = models.CharField(
+        max_length=20,
+        default='user',
+        choices=[
+            ('user', 'User'),
+            ('system', 'System'),
+            ('api', 'API Key'),
+            ('webhook', 'Webhook'),
+        ]
+    )
+
+    # Action details
+    action = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text=_('Action identifier (e.g., member.created)')
+    )
+    action_category = models.CharField(
+        max_length=20,
+        choices=ACTION_CATEGORIES,
+        db_index=True
+    )
+    description = models.TextField(
+        help_text=_('Human-readable description')
+    )
+
+    # Target resource
+    resource_type = models.CharField(
+        max_length=50,
+        db_index=True,
+        help_text=_('Type of resource affected')
+    )
+    resource_id = models.CharField(
+        max_length=100,
+        blank=True,
+        db_index=True,
+        help_text=_('ID of the resource affected')
+    )
+    resource_repr = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text=_('String representation of the resource')
+    )
+
+    # Generic foreign key for direct relationship
+    content_type = models.ForeignKey(
+        ContentType,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+    object_id = models.CharField(max_length=100, blank=True)
+    content_object = GenericForeignKey('content_type', 'object_id')
+
+    # Changes tracking
+    changes = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Before/after values for updates')
+    )
+    metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Additional context')
+    )
+
+    # Request context
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True)
+    request_id = models.CharField(max_length=100, blank=True, db_index=True)
+    request_path = models.CharField(max_length=500, blank=True)
+    request_method = models.CharField(max_length=10, blank=True)
+
+    # Severity
+    severity = models.CharField(
+        max_length=20,
+        choices=SEVERITY_CHOICES,
+        default='info'
+    )
+
+    # Product context (optional)
+    product = models.ForeignKey(
+        'products.Product',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='audit_logs'
+    )
+
+    objects = AuditLogManager()
+
+    class Meta:
+        db_table = 'audit_logs'
+        verbose_name = _('audit log')
+        verbose_name_plural = _('audit logs')
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['organization', 'created_at']),
+            models.Index(fields=['organization', 'action']),
+            models.Index(fields=['actor', 'created_at']),
+            models.Index(fields=['resource_type', 'resource_id']),
+            models.Index(fields=['action_category', 'created_at']),
+            models.Index(fields=['request_id']),
+            models.Index(fields=['-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.action} by {self.actor_email} at {self.created_at}"
+
+    def save(self, *args, **kwargs):
+        # Preserve actor email
+        if self.actor and not self.actor_email:
+            self.actor_email = self.actor.email
+        
+        # Prevent updates (audit logs are immutable)
+        if self.pk:
+            raise ValueError("Audit logs cannot be modified")
+        
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # Prevent deletion (audit logs are immutable)
+        raise ValueError("Audit logs cannot be deleted")
+
+
+class AuditEventType(BaseModel):
+    """
+    Registry of audit event types.
+    """
+    code = models.CharField(
+        max_length=100,
+        unique=True,
+        help_text=_('Event code (e.g., member.created)')
+    )
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    category = models.CharField(max_length=50)
+    severity = models.CharField(
+        max_length=20,
+        default='info'
+    )
+    is_active = models.BooleanField(default=True)
+    
+    # Template for description
+    description_template = models.TextField(
+        blank=True,
+        help_text=_('Template for generating descriptions')
+    )
+
+    class Meta:
+        db_table = 'audit_event_types'
+        verbose_name = _('audit event type')
+        verbose_name_plural = _('audit event types')
+        ordering = ['category', 'code']
+
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+```
+
+### `apps/audit/managers.py`
+
+```python
+"""
+Custom managers for Audit models.
+"""
+from django.db import models
+from django.utils import timezone
+from datetime import timedelta
+
+
+class AuditLogQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for AuditLog model.
+    """
+    def for_organization(self, organization):
+        """Filter by organization."""
+        return self.filter(organization=organization)
+
+    def for_actor(self, user):
+        """Filter by actor."""
+        return self.filter(actor=user)
+
+    def for_resource(self, resource_type, resource_id=None):
+        """Filter by resource."""
+        qs = self.filter(resource_type=resource_type)
+        if resource_id:
+            qs = qs.filter(resource_id=str(resource_id))
+        return qs
+
+    def for_action(self, action):
+        """Filter by action."""
+        return self.filter(action=action)
+
+    def for_category(self, category):
+        """Filter by category."""
+        return self.filter(action_category=category)
+
+    def recent(self, days=30):
+        """Filter to recent logs."""
+        cutoff = timezone.now() - timedelta(days=days)
+        return self.filter(created_at__gte=cutoff)
+
+    def with_severity(self, severity):
+        """Filter by severity."""
+        return self.filter(severity=severity)
+
+    def in_date_range(self, start_date, end_date):
+        """Filter by date range."""
+        return self.filter(created_at__range=(start_date, end_date))
+
+
+class AuditLogManager(models.Manager):
+    """
+    Custom manager for AuditLog model.
+    """
+    def get_queryset(self):
+        return AuditLogQuerySet(self.model, using=self._db)
+
+    def for_organization(self, organization):
+        return self.get_queryset().for_organization(organization)
+
+    def for_actor(self, user):
+        return self.get_queryset().for_actor(user)
+
+    def for_resource(self, resource_type, resource_id=None):
+        return self.get_queryset().for_resource(resource_type, resource_id)
+
+    def log(
+        self,
+        action,
+        actor=None,
+        organization=None,
+        resource_type='',
+        resource_id='',
+        resource_repr='',
+        changes=None,
+        metadata=None,
+        ip_address=None,
+        user_agent='',
+        request_id='',
+        request_path='',
+        request_method='',
+        severity='info',
+        product=None,
+        description=''
+    ):
+        """
+        Create an audit log entry.
+        """
+        # Determine action category
+        category = action.split('.')[0] if '.' in action else 'system'
+        
+        # Auto-generate description if not provided
+        if not description:
+            description = f"{action} performed"
+            if resource_repr:
+                description += f" on {resource_repr}"
+
+        return self.create(
+            action=action,
+            action_category=category,
+            description=description,
+            actor=actor,
+            actor_type='user' if actor else 'system',
+            organization=organization,
+            resource_type=resource_type,
+            resource_id=str(resource_id) if resource_id else '',
+            resource_repr=resource_repr,
+            changes=changes or {},
+            metadata=metadata or {},
+            ip_address=ip_address,
+            user_agent=user_agent,
+            request_id=request_id,
+            request_path=request_path,
+            request_method=request_method,
+            severity=severity,
+            product=product,
+        )
+```
+
+### `apps/audit/services.py`
+
+```python
+"""
+Audit logging services.
+"""
+import logging
+from typing import Optional, Any, Dict
+from django.db import transaction
+from django.contrib.contenttypes.models import ContentType
+
+from apps.authentication.models import User
+from apps.organizations.models import Organization
+from .models import AuditLog
+
+logger = logging.getLogger(__name__)
+
+
+class AuditService:
+    """
+    Service for creating and querying audit logs.
+    """
+    
+    # Context storage for request data
+    _context = {}
+
+    @classmethod
+    def set_request_context(
+        cls,
+        request_id: str = '',
+        ip_address: str = None,
+        user_agent: str = '',
+        request_path: str = '',
+        request_method: str = '',
+        actor: User = None,
+        organization: Organization = None
+    ):
+        """
+        Set request context for audit logging.
+        Called by middleware.
+        """
+        cls._context = {
+            'request_id': request_id,
+            'ip_address': ip_address,
+            'user_agent': user_agent,
+            'request_path': request_path,
+            'request_method': request_method,
+            'actor': actor,
+            'organization': organization,
+        }
+
+    @classmethod
+    def clear_context(cls):
+        """Clear request context."""
+        cls._context = {}
+
+    @classmethod
+    def get_context(cls) -> Dict:
+        """Get current context."""
+        return cls._context.copy()
+
+    @staticmethod
+    def log(
+        action: str,
+        actor: User = None,
+        organization: Organization = None,
+        resource: Any = None,
+        resource_type: str = '',
+        resource_id: str = '',
+        resource_repr: str = '',
+        changes: Dict = None,
+        metadata: Dict = None,
+        severity: str = 'info',
+        description: str = '',
+        product=None
+    ) -> AuditLog:
+        """
+        Create an audit log entry.
+        """
+        # Use context if not provided
+        context = AuditService.get_context()
+        
+        if not actor:
+            actor = context.get('actor')
+        if not organization:
+            organization = context.get('organization')
+
+        # Handle resource object
+        if resource:
+            content_type = ContentType.objects.get_for_model(resource)
+            resource_type = resource_type or f"{content_type.app_label}.{content_type.model}"
+            resource_id = resource_id or str(resource.pk)
+            resource_repr = resource_repr or str(resource)
+
+        audit_log = AuditLog.objects.log(
+            action=action,
+            actor=actor,
+            organization=organization,
+            resource_type=resource_type,
+            resource_id=str(resource_id) if resource_id else '',
+            resource_repr=resource_repr,
+            changes=changes,
+            metadata=metadata,
+            ip_address=context.get('ip_address'),
+            user_agent=context.get('user_agent', ''),
+            request_id=context.get('request_id', ''),
+            request_path=context.get('request_path', ''),
+            request_method=context.get('request_method', ''),
+            severity=severity,
+            description=description,
+            product=product,
+        )
+
+        logger.info(f"Audit: {action}", extra={
+            'audit_log_id': str(audit_log.id),
+            'action': action,
+            'actor': str(actor.id) if actor else None,
+            'organization': str(organization.id) if organization else None,
+        })
+
+        return audit_log
+
+    @staticmethod
+    def log_model_change(
+        action: str,
+        instance: Any,
+        actor: User = None,
+        organization: Organization = None,
+        old_values: Dict = None,
+        new_values: Dict = None,
+        fields: list = None
+    ) -> AuditLog:
+        """
+        Log a model change with before/after values.
+        """
+        changes = {}
+        
+        if old_values and new_values:
+            # Calculate changes
+            for key in set(list(old_values.keys()) + list(new_values.keys())):
+                if fields and key not in fields:
+                    continue
+                
+                old_val = old_values.get(key)
+                new_val = new_values.get(key)
+                
+                if old_val != new_val:
+                    changes[key] = {
+                        'old': old_val,
+                        'new': new_val
+                    }
+
+        return AuditService.log(
+            action=action,
+            actor=actor,
+            organization=organization,
+            resource=instance,
+            changes=changes,
+        )
+
+    @staticmethod
+    def get_resource_history(
+        resource_type: str,
+        resource_id: str,
+        organization: Organization = None
+    ) -> list:
+        """
+        Get audit history for a specific resource.
+        """
+        queryset = AuditLog.objects.for_resource(resource_type, resource_id)
+        
+        if organization:
+            queryset = queryset.filter(organization=organization)
+        
+        return queryset.order_by('-created_at')
+
+    @staticmethod
+    def get_user_activity(
+        user: User,
+        organization: Organization = None,
+        limit: int = 100
+    ) -> list:
+        """
+        Get audit activity for a user.
+        """
+        queryset = AuditLog.objects.for_actor(user)
+        
+        if organization:
+            queryset = queryset.filter(organization=organization)
+        
+        return queryset.order_by('-created_at')[:limit]
+
+    @staticmethod
+    def export_logs(
+        organization: Organization,
+        start_date=None,
+        end_date=None,
+        format: str = 'json'
+    ) -> str:
+        """
+        Export audit logs for an organization.
+        """
+        queryset = AuditLog.objects.for_organization(organization)
+        
+        if start_date and end_date:
+            queryset = queryset.in_date_range(start_date, end_date)
+        
+        # Return as list of dicts for now
+        # In production, would stream to file
+        logs = queryset.values(
+            'id', 'action', 'actor_email', 'resource_type',
+            'resource_id', 'description', 'changes', 'ip_address',
+            'created_at'
+        )
+        
+        return list(logs)
+```
+
+### `apps/audit/middleware.py`
+
+```python
+"""
+Audit logging middleware.
+"""
+import logging
+from django.utils.deprecation import MiddlewareMixin
+from .services import AuditService
+
+logger = logging.getLogger(__name__)
+
+
+class AuditMiddleware(MiddlewareMixin):
+    """
+    Middleware to capture request context for audit logging.
+    """
+    
+    # Actions that should be auto-logged
+    AUTO_LOG_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE']
+    
+    # Paths to exclude from auto-logging
+    EXCLUDE_PATHS = [
+        '/api/v1/auth/refresh/',
+        '/health/',
+        '/api/docs/',
+        '/api/schema/',
+        '/admin/jsi18n/',
+    ]
+
+    def process_request(self, request):
+        """Set audit context from request."""
+        # Get organization from tenant context
+        organization = None
+        org_id = getattr(request, 'tenant_context', {}).get('organization_id')
+        
+        if org_id:
+            from apps.organizations.models import Organization
+            try:
+                organization = Organization.objects.get(id=org_id)
+            except Organization.DoesNotExist:
+                pass
+
+        # Set context
+        AuditService.set_request_context(
+            request_id=getattr(request, 'request_id', ''),
+            ip_address=self._get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')[:500],
+            request_path=request.path,
+            request_method=request.method,
+            actor=request.user if hasattr(request, 'user') and request.user.is_authenticated else None,
+            organization=organization,
+        )
+
+    def process_response(self, request, response):
+        """Clear audit context after request."""
+        # Log failed requests with elevated severity
+        if response.status_code >= 400 and request.method in self.AUTO_LOG_METHODS:
+            if not any(request.path.startswith(p) for p in self.EXCLUDE_PATHS):
+                self._log_error_response(request, response)
+
+        # Clear context
+        AuditService.clear_context()
+        
+        return response
+
+    def _get_client_ip(self, request):
+        """Get client IP from request."""
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            return x_forwarded_for.split(',')[0].strip()
+        return request.META.get('REMOTE_ADDR')
+
+    def _log_error_response(self, request, response):
+        """Log error responses."""
+        try:
+            AuditService.log(
+                action='system.error',
+                severity='warning' if response.status_code < 500 else 'error',
+                metadata={
+                    'status_code': response.status_code,
+                    'path': request.path,
+                    'method': request.method,
+                }
+            )
+        except Exception as e:
+            logger.error(f"Failed to log error response: {e}")
+```
+
+### `apps/audit/serializers.py`
+
+```python
+"""
+Audit serializers.
+"""
+from rest_framework import serializers
+from apps.authentication.serializers import UserSerializer
+from .models import AuditLog, AuditEventType
+
+
+class AuditLogSerializer(serializers.ModelSerializer):
+    """
+    Serializer for AuditLog model.
+    """
+    actor = UserSerializer(read_only=True)
+
+    class Meta:
+        model = AuditLog
+        fields = [
+            'id',
+            'organization',
+            'actor',
+            'actor_email',
+            'actor_type',
+            'action',
+            'action_category',
+            'description',
+            'resource_type',
+            'resource_id',
+            'resource_repr',
+            'changes',
+            'metadata',
+            'ip_address',
+            'user_agent',
+            'request_id',
+            'severity',
+            'product',
+            'created_at',
+        ]
+
+
+class AuditLogListSerializer(serializers.ModelSerializer):
+    """
+    Lightweight serializer for listing audit logs.
+    """
+    actor_name = serializers.CharField(source='actor.display_name', read_only=True)
+
+    class Meta:
+        model = AuditLog
+        fields = [
+            'id',
+            'action',
+            'action_category',
+            'description',
+            'actor_email',
+            'actor_name',
+            'resource_type',
+            'resource_repr',
+            'severity',
+            'ip_address',
+            'created_at',
+        ]
+
+
+class AuditEventTypeSerializer(serializers.ModelSerializer):
+    """
+    Serializer for AuditEventType model.
+    """
+    class Meta:
+        model = AuditEventType
+        fields = [
+            'id',
+            'code',
+            'name',
+            'description',
+            'category',
+            'severity',
+        ]
+
+
+class AuditExportSerializer(serializers.Serializer):
+    """
+    Serializer for audit log export.
+    """
+    start_date = serializers.DateTimeField(required=False)
+    end_date = serializers.DateTimeField(required=False)
+    format = serializers.ChoiceField(
+        choices=['json', 'csv'],
+        default='json'
+    )
+```
+
+### `apps/audit/views.py`
+
+```python
+"""
+Audit views.
+"""
+import logging
+from rest_framework import generics, views, status
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from datetime import timedelta
+
+from apps.core.permissions import IsOrganizationMember
+from apps.organizations.models import Organization
+from apps.rbac.permissions import HasPermission
+from .models import AuditLog, AuditEventType
+from .serializers import (
+    AuditLogSerializer,
+    AuditLogListSerializer,
+    AuditEventTypeSerializer,
+    AuditExportSerializer,
+)
+from .services import AuditService
+
+logger = logging.getLogger(__name__)
+
+
+class OrganizationAuditMixin:
+    """Mixin to get organization from URL."""
+    def get_organization(self):
+        org_id = self.kwargs.get('org_id')
+        return get_object_or_404(Organization, id=org_id)
+
+
+@extend_schema(tags=['Audit Logs'])
+class AuditLogListView(OrganizationAuditMixin, generics.ListAPIView):
+    """
+    List audit logs for an organization.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'audit.read'
+    serializer_class = AuditLogListSerializer
+
+    @extend_schema(
+        summary="List audit logs",
+        parameters=[
+            OpenApiParameter(name='action', type=str, description='Filter by action'),
+            OpenApiParameter(name='category', type=str, description='Filter by category'),
+            OpenApiParameter(name='actor_id', type=str, description='Filter by actor'),
+            OpenApiParameter(name='resource_type', type=str, description='Filter by resource type'),
+            OpenApiParameter(name='start_date', type=str, description='Start date (ISO format)'),
+            OpenApiParameter(name='end_date', type=str, description='End date (ISO format)'),
+            OpenApiParameter(name='severity', type=str, description='Filter by severity'),
+        ],
+        responses={200: AuditLogListSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        queryset = AuditLog.objects.for_organization(organization)
+
+        # Apply filters
+        params = self.request.query_params
+
+        if action := params.get('action'):
+            queryset = queryset.filter(action=action)
+
+        if category := params.get('category'):
+            queryset = queryset.filter(action_category=category)
+
+        if actor_id := params.get('actor_id'):
+            queryset = queryset.filter(actor_id=actor_id)
+
+        if resource_type := params.get('resource_type'):
+            queryset = queryset.filter(resource_type=resource_type)
+
+        if severity := params.get('severity'):
+            queryset = queryset.filter(severity=severity)
+
+        if start_date := params.get('start_date'):
+            queryset = queryset.filter(created_at__gte=start_date)
+
+        if end_date := params.get('end_date'):
+            queryset = queryset.filter(created_at__lte=end_date)
+
+        return queryset.select_related('actor').order_by('-created_at')
+
+
+@extend_schema(tags=['Audit Logs'])
+class AuditLogDetailView(OrganizationAuditMixin, generics.RetrieveAPIView):
+    """
+    Get audit log details.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'audit.read'
+    serializer_class = AuditLogSerializer
+    lookup_url_kwarg = 'log_id'
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return AuditLog.objects.for_organization(organization)
+
+
+@extend_schema(tags=['Audit Logs'])
+class AuditLogExportView(OrganizationAuditMixin, views.APIView):
+    """
+    Export audit logs.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'audit.export'
+
+    @extend_schema(
+        summary="Export audit logs",
+        request=AuditExportSerializer,
+        responses={200: OpenApiResponse(description="Exported data")}
+    )
+    def post(self, request, org_id):
+        organization = self.get_organization()
+
+        serializer = AuditExportSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        # Default to last 30 days
+        end_date = serializer.validated_data.get('end_date') or timezone.now()
+        start_date = serializer.validated_data.get('start_date') or (end_date - timedelta(days=30))
+
+        logs = AuditService.export_logs(
+            organization=organization,
+            start_date=start_date,
+            end_date=end_date,
+            format=serializer.validated_data.get('format', 'json')
+        )
+
+        # Log this export
+        AuditService.log(
+            action='audit.exported',
+            actor=request.user,
+            organization=organization,
+            metadata={
+                'start_date': str(start_date),
+                'end_date': str(end_date),
+                'count': len(logs),
+            }
+        )
+
+        return Response({
+            'data': logs,
+            'meta': {
+                'count': len(logs),
+                'start_date': start_date.isoformat(),
+                'end_date': end_date.isoformat(),
+            }
+        })
+
+
+@extend_schema(tags=['Audit Logs'])
+class ResourceAuditHistoryView(OrganizationAuditMixin, generics.ListAPIView):
+    """
+    Get audit history for a specific resource.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'audit.read'
+    serializer_class = AuditLogListSerializer
+
+    @extend_schema(
+        summary="Get resource audit history",
+        responses={200: AuditLogListSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        resource_type = self.kwargs.get('resource_type')
+        resource_id = self.kwargs.get('resource_id')
+
+        return AuditService.get_resource_history(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            organization=organization
+        )
+
+
+@extend_schema(tags=['Audit Logs'])
+class UserAuditActivityView(OrganizationAuditMixin, generics.ListAPIView):
+    """
+    Get audit activity for a user.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'audit.read'
+    serializer_class = AuditLogListSerializer
+
+    @extend_schema(
+        summary="Get user audit activity",
+        responses={200: AuditLogListSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        user_id = self.kwargs.get('user_id')
+
+        from apps.authentication.models import User
+        user = get_object_or_404(User, id=user_id)
+
+        return AuditService.get_user_activity(
+            user=user,
+            organization=organization
+        )
+
+
+@extend_schema(tags=['Audit Logs'])
+class AuditActionTypesView(views.APIView):
+    """
+    List available audit action types.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="List audit action types",
+        responses={200: AuditEventTypeSerializer(many=True)}
+    )
+    def get(self, request):
+        event_types = AuditEventType.objects.filter(is_active=True)
+        serializer = AuditEventTypeSerializer(event_types, many=True)
+
+        return Response({'data': serializer.data})
+```
+
+### `apps/audit/urls.py`
+
+```python
+"""
+Audit URL patterns.
+"""
+from django.urls import path
+from .views import (
+    AuditLogListView,
+    AuditLogDetailView,
+    AuditLogExportView,
+    ResourceAuditHistoryView,
+    UserAuditActivityView,
+    AuditActionTypesView,
+)
+
+app_name = 'audit'
+
+urlpatterns = [
+    # Audit logs
+    path(
+        'organizations/<uuid:org_id>/audit-logs/',
+        AuditLogListView.as_view(),
+        name='list'
+    ),
+    path(
+        'organizations/<uuid:org_id>/audit-logs/<uuid:log_id>/',
+        AuditLogDetailView.as_view(),
+        name='detail'
+    ),
+    path(
+        'organizations/<uuid:org_id>/audit-logs/export/',
+        AuditLogExportView.as_view(),
+        name='export'
+    ),
+    path(
+        'organizations/<uuid:org_id>/audit-logs/resources/<str:resource_type>/<str:resource_id>/',
+        ResourceAuditHistoryView.as_view(),
+        name='resource-history'
+    ),
+    path(
+        'organizations/<uuid:org_id>/audit-logs/users/<uuid:user_id>/',
+        UserAuditActivityView.as_view(),
+        name='user-activity'
+    ),
+    
+    # Global
+    path(
+        'audit/action-types/',
+        AuditActionTypesView.as_view(),
+        name='action-types'
+    ),
+]
+```
+
+### `apps/audit/signals.py`
+
+```python
+"""
+Audit signals for automatic logging.
+"""
+import logging
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+from .services import AuditService
+
+logger = logging.getLogger(__name__)
+
+
+# Organization events
+@receiver(post_save, sender='organizations.Organization')
+def log_organization_save(sender, instance, created, **kwargs):
+    """Log organization create/update."""
+    action = 'organization.created' if created else 'organization.updated'
+    AuditService.log(
+        action=action,
+        resource=instance,
+        organization=instance if not created else None,
+    )
+
+
+@receiver(post_save, sender='organizations.OrganizationMember')
+def log_member_save(sender, instance, created, **kwargs):
+    """Log member create/update."""
+    action = 'member.added' if created else 'member.updated'
+    AuditService.log(
+        action=action,
+        resource=instance,
+        organization=instance.organization,
+        resource_repr=f"{instance.user.email} ({instance.role})",
+    )
+
+
+@receiver(post_delete, sender='organizations.OrganizationMember')
+def log_member_delete(sender, instance, **kwargs):
+    """Log member removal."""
+    AuditService.log(
+        action='member.removed',
+        resource_type='organizations.organizationmember',
+        resource_id=str(instance.id),
+        resource_repr=instance.user.email,
+        organization=instance.organization,
+    )
+
+
+# Team events
+@receiver(post_save, sender='teams.Team')
+def log_team_save(sender, instance, created, **kwargs):
+    """Log team create/update."""
+    action = 'team.created' if created else 'team.updated'
+    AuditService.log(
+        action=action,
+        resource=instance,
+        organization=instance.organization,
+    )
+
+
+@receiver(post_save, sender='teams.TeamMember')
+def log_team_member_save(sender, instance, created, **kwargs):
+    """Log team member add/update."""
+    action = 'team.member.added' if created else 'team.member.updated'
+    AuditService.log(
+        action=action,
+        resource=instance,
+        organization=instance.team.organization,
+        resource_repr=f"{instance.user.email} in {instance.team.name}",
+    )
+
+
+# Invitation events
+@receiver(post_save, sender='invitations.Invitation')
+def log_invitation_save(sender, instance, created, **kwargs):
+    """Log invitation events."""
+    if created:
+        action = 'invitation.created'
+    elif instance.status == 'accepted':
+        action = 'invitation.accepted'
+    elif instance.status == 'declined':
+        action = 'invitation.declined'
+    elif instance.status == 'cancelled':
+        action = 'invitation.cancelled'
+    else:
+        action = 'invitation.updated'
+
+    AuditService.log(
+        action=action,
+        resource=instance,
+        organization=instance.organization,
+        resource_repr=instance.email,
+    )
+
+
+# Role events
+@receiver(post_save, sender='rbac.Role')
+def log_role_save(sender, instance, created, **kwargs):
+    """Log role create/update."""
+    if instance.is_system_role:
+        return  # Don't log system role changes
+
+    action = 'role.created' if created else 'role.updated'
+    AuditService.log(
+        action=action,
+        resource=instance,
+        organization=instance.organization,
+    )
+
+
+@receiver(post_save, sender='rbac.UserRole')
+def log_user_role_save(sender, instance, created, **kwargs):
+    """Log role assignment."""
+    action = 'role.assigned' if created else 'role.assignment.updated'
+    AuditService.log(
+        action=action,
+        resource=instance,
+        organization=instance.organization,
+        resource_repr=f"{instance.role.name} to {instance.user.email}",
+    )
+```
+
+### `apps/audit/admin.py`
+
+```python
+"""
+Admin configuration for audit models.
+"""
+from django.contrib import admin
+from django.utils.html import format_html
+from .models import AuditLog, AuditEventType
+
+
+@admin.register(AuditLog)
+class AuditLogAdmin(admin.ModelAdmin):
+    """Admin for AuditLog model."""
+    list_display = [
+        'action',
+        'actor_email',
+        'organization',
+        'resource_type',
+        'resource_repr',
+        'severity_badge',
+        'ip_address',
+        'created_at',
+    ]
+    list_filter = [
+        'action_category',
+        'severity',
+        'actor_type',
+        'organization',
+        'created_at',
+    ]
+    search_fields = [
+        'action',
+        'actor_email',
+        'resource_type',
+        'resource_id',
+        'description',
+        'ip_address',
+        'request_id',
+    ]
+    readonly_fields = [
+        'id',
+        'organization',
+        'actor',
+        'actor_email',
+        'actor_type',
+        'action',
+        'action_category',
+        'description',
+        'resource_type',
+        'resource_id',
+        'resource_repr',
+        'changes',
+        'metadata',
+        'ip_address',
+        'user_agent',
+        'request_id',
+        'request_path',
+        'request_method',
+        'severity',
+        'product',
+        'created_at',
+    ]
+    ordering = ['-created_at']
+    date_hierarchy = 'created_at'
+
+    def severity_badge(self, obj):
+        """Display severity with colored badge."""
+        colors = {
+            'info': '#17A2B8',
+            'warning': '#FFC107',
+            'error': '#DC3545',
+            'critical': '#721C24',
+        }
+        color = colors.get(obj.severity, '#6C757D')
+        return format_html(
+            '<span style="background-color: {}; color: white; padding: 3px 8px; '
+            'border-radius: 3px; font-size: 11px;">{}</span>',
+            color,
+            obj.severity.upper()
+        )
+    severity_badge.short_description = 'Severity'
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AuditEventType)
+class AuditEventTypeAdmin(admin.ModelAdmin):
+    """Admin for AuditEventType model."""
+    list_display = ['code', 'name', 'category', 'severity', 'is_active']
+    list_filter = ['category', 'severity', 'is_active']
+    search_fields = ['code', 'name', 'description']
+    ordering = ['category', 'code']
+```

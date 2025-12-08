@@ -1,0 +1,1672 @@
+---
+title: 'Organizations'
+description: 'Now I'll build the organizations system with membership management'
+sidebarTitle: "Organizations"
+---
+
+## Organizations App Structure
+
+```
+apps/
+├── organizations/
+│   ├── __init__.py
+│   ├── apps.py
+│   ├── models.py          # Organization, Member, Settings
+│   ├── managers.py        # Custom managers
+│   ├── serializers.py     # Organization serializers
+│   ├── views.py           # Organization views
+│   ├── urls.py            # Organization URLs
+│   ├── services.py        # Business logic
+│   ├── permissions.py     # Organization permissions
+│   ├── tasks.py           # Celery tasks
+│   ├── signals.py         # Organization signals
+│   └── admin.py
+│
+└── teams/
+    ├── __init__.py
+    ├── apps.py
+    ├── models.py          # Team, TeamMember
+    ├── serializers.py     # Team serializers
+    ├── views.py           # Team views
+    ├── urls.py            # Team URLs
+    ├── services.py        # Business logic
+    └── admin.py
+```
+
+---
+
+## Organizations Models
+
+### `apps/organizations/apps.py`
+
+```python
+from django.apps import AppConfig
+
+
+class OrganizationsConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.organizations'
+    verbose_name = 'Organizations'
+
+    def ready(self):
+        """Import signals when app is ready."""
+        import apps.organizations.signals  # noqa
+```
+
+### `apps/organizations/models.py`
+
+```python
+"""
+Organization models.
+"""
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+from django.utils.text import slugify
+from django.core.validators import MinLengthValidator
+from apps.core.models import BaseModel, SoftDeleteModel, TimestampedModel
+from apps.core.mixins import StatusMixin, MetadataMixin
+from apps.core.validators import validate_slug
+from apps.authentication.models import User
+from .managers import OrganizationManager, OrganizationMemberManager
+import uuid
+
+
+class Organization(BaseModel, SoftDeleteModel, StatusMixin, MetadataMixin):
+    """
+    Organization model - the core tenant entity.
+    """
+    TIER_CHOICES = [
+        ('free', 'Free'),
+        ('starter', 'Starter'),
+        ('pro', 'Professional'),
+        ('enterprise', 'Enterprise'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('trial', 'Trial'),
+        ('suspended', 'Suspended'),
+        ('churned', 'Churned'),
+        ('pending', 'Pending Setup'),
+    ]
+    
+    ISOLATION_LEVEL_CHOICES = [
+        ('shared', 'Shared'),
+        ('dedicated_schema', 'Dedicated Schema'),
+        ('dedicated_db', 'Dedicated Database'),
+    ]
+    
+    # Basic Information
+    name = models.CharField(
+        _('organization name'),
+        max_length=255,
+        validators=[MinLengthValidator(2)]
+    )
+    slug = models.SlugField(
+        _('slug'),
+        max_length=255,
+        unique=True,
+        validators=[validate_slug],
+        help_text=_('URL-safe identifier for the organization')
+    )
+    description = models.TextField(
+        _('description'),
+        blank=True,
+        help_text=_('Brief description of the organization')
+    )
+    
+    # Ownership
+    owner = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='owned_organizations',
+        help_text=_('The owner of this organization')
+    )
+    
+    # Billing & Subscription
+    tier = models.CharField(
+        max_length=20,
+        choices=TIER_CHOICES,
+        default='free',
+        db_index=True
+    )
+    trial_ends_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=_('When the trial period ends')
+    )
+    
+    # Tenant Isolation
+    isolation_level = models.CharField(
+        max_length=20,
+        choices=ISOLATION_LEVEL_CHOICES,
+        default='shared',
+        help_text=_('Database isolation level for this tenant')
+    )
+    
+    # Branding
+    logo_url = models.URLField(
+        _('logo URL'),
+        max_length=500,
+        blank=True
+    )
+    website = models.URLField(
+        _('website'),
+        max_length=255,
+        blank=True
+    )
+    
+    # Contact Information
+    billing_email = models.EmailField(
+        _('billing email'),
+        blank=True,
+        help_text=_('Email for billing notifications')
+    )
+    support_email = models.EmailField(
+        _('support email'),
+        blank=True,
+        help_text=_('Email for support requests')
+    )
+    
+    # Settings (stored in separate model)
+    # Members (via OrganizationMember)
+    # Teams (via Team model)
+    
+    # Address (for billing/tax purposes)
+    country = models.CharField(max_length=2, blank=True)  # ISO 3166-1 alpha-2
+    address_line1 = models.CharField(max_length=255, blank=True)
+    address_line2 = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    state_province = models.CharField(max_length=100, blank=True)
+    postal_code = models.CharField(max_length=20, blank=True)
+    
+    # Tax Information
+    tax_id = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text=_('VAT/Tax ID for invoicing')
+    )
+    
+    # Limits (for tier enforcement)
+    max_members = models.IntegerField(default=5)
+    max_teams = models.IntegerField(default=3)
+    max_projects = models.IntegerField(default=10)
+    
+    objects = OrganizationManager()
+    
+    class Meta:
+        db_table = 'organizations'
+        verbose_name = _('organization')
+        verbose_name_plural = _('organizations')
+        indexes = [
+            models.Index(fields=['slug']),
+            models.Index(fields=['status', 'tier']),
+            models.Index(fields=['owner']),
+        ]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.name
+    
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = self.generate_unique_slug()
+        super().save(*args, **kwargs)
+    
+    def generate_unique_slug(self):
+        """Generate unique slug from name."""
+        base_slug = slugify(self.name)
+        slug = base_slug
+        counter = 1
+        
+        while Organization.objects.filter(slug=slug).exists():
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        
+        return slug
+    
+    @property
+    def is_trial(self):
+        """Check if organization is in trial period."""
+        from django.utils import timezone
+        return (
+            self.status == 'trial' and 
+            self.trial_ends_at and 
+            self.trial_ends_at > timezone.now()
+        )
+    
+    @property
+    def member_count(self):
+        """Get current member count."""
+        return self.members.filter(status='active').count()
+    
+    @property
+    def can_add_member(self):
+        """Check if organization can add more members."""
+        return self.member_count < self.max_members
+    
+    def transfer_ownership(self, new_owner):
+        """Transfer organization ownership."""
+        from django.db import transaction
+        
+        with transaction.atomic():
+            # Ensure new owner is a member
+            if not self.members.filter(user=new_owner, status='active').exists():
+                OrganizationMember.objects.create(
+                    organization=self,
+                    user=new_owner,
+                    role='owner'
+                )
+            else:
+                # Update existing membership to owner
+                self.members.filter(user=new_owner).update(role='owner')
+            
+            # Update organization owner
+            old_owner = self.owner
+            self.owner = new_owner
+            self.save(update_fields=['owner', 'updated_at'])
+            
+            # Downgrade old owner to admin
+            self.members.filter(user=old_owner).update(role='admin')
+            
+            return True
+
+
+class OrganizationMember(BaseModel, StatusMixin):
+    """
+    Membership relation between User and Organization.
+    """
+    ROLE_CHOICES = [
+        ('owner', 'Owner'),
+        ('admin', 'Admin'),
+        ('member', 'Member'),
+        ('viewer', 'Viewer'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('invited', 'Invited'),
+        ('suspended', 'Suspended'),
+        ('removed', 'Removed'),
+    ]
+    
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='members'
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='organization_memberships'
+    )
+    role = models.CharField(
+        max_length=20,
+        choices=ROLE_CHOICES,
+        default='member',
+        db_index=True
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='active',
+        db_index=True
+    )
+    
+    # Tracking
+    joined_at = models.DateTimeField(auto_now_add=True)
+    invited_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='organization_invitations_sent'
+    )
+    
+    # Permissions cache (JSON field for quick lookups)
+    cached_permissions = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=_('Cached permissions for quick access')
+    )
+    
+    objects = OrganizationMemberManager()
+    
+    class Meta:
+        db_table = 'organization_members'
+        verbose_name = _('organization member')
+        verbose_name_plural = _('organization members')
+        unique_together = [['organization', 'user']]
+        indexes = [
+            models.Index(fields=['organization', 'status']),
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['role']),
+        ]
+        ordering = ['-joined_at']
+
+    def __str__(self):
+        return f"{self.user.email} - {self.organization.name} ({self.role})"
+    
+    @property
+    def is_owner(self):
+        return self.role == 'owner'
+    
+    @property
+    def is_admin(self):
+        return self.role in ['owner', 'admin']
+    
+    @property
+    def can_manage_members(self):
+        return self.role in ['owner', 'admin']
+    
+    @property
+    def can_manage_billing(self):
+        return self.role in ['owner', 'admin']
+    
+    def update_cached_permissions(self):
+        """Update cached permissions based on role."""
+        # This will be implemented when RBAC is added
+        from apps.rbac.services import PermissionService
+        self.cached_permissions = PermissionService.get_member_permissions(self)
+        self.save(update_fields=['cached_permissions'])
+
+
+class OrganizationSettings(BaseModel):
+    """
+    Settings for an organization.
+    """
+    organization = models.OneToOneField(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='settings'
+    )
+    
+    # General Settings
+    timezone = models.CharField(
+        max_length=50,
+        default='UTC',
+        help_text=_('Default timezone for the organization')
+    )
+    locale = models.CharField(
+        max_length=10,
+        default='en',
+        help_text=_('Default locale for the organization')
+    )
+    date_format = models.CharField(
+        max_length=20,
+        default='YYYY-MM-DD',
+        help_text=_('Date format preference')
+    )
+    time_format = models.CharField(
+        max_length=10,
+        default='24h',
+        choices=[('12h', '12-hour'), ('24h', '24-hour')]
+    )
+    
+    # Security Settings
+    require_2fa = models.BooleanField(
+        default=False,
+        help_text=_('Require two-factor authentication for all members')
+    )
+    allowed_email_domains = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=_('Restrict members to specific email domains')
+    )
+    ip_whitelist = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=_('IP addresses allowed to access the organization')
+    )
+    session_timeout_minutes = models.IntegerField(
+        default=1440,  # 24 hours
+        help_text=_('Session timeout in minutes')
+    )
+    
+    # Features & Modules
+    enabled_features = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Feature flags for the organization')
+    )
+    
+    # Notification Preferences
+    notification_channels = models.JSONField(
+        default=lambda: {'email': True, 'in_app': True},
+        help_text=_('Enabled notification channels')
+    )
+    weekly_digest = models.BooleanField(
+        default=True,
+        help_text=_('Send weekly activity digest')
+    )
+    
+    # Billing Preferences
+    invoice_prefix = models.CharField(
+        max_length=10,
+        blank=True,
+        help_text=_('Prefix for invoice numbers')
+    )
+    invoice_notes = models.TextField(
+        blank=True,
+        help_text=_('Default notes for invoices')
+    )
+    auto_recharge = models.BooleanField(
+        default=False,
+        help_text=_('Automatically recharge credits when low')
+    )
+    auto_recharge_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True
+    )
+    
+    # Compliance & Legal
+    data_retention_days = models.IntegerField(
+        default=365,
+        help_text=_('Days to retain data after deletion')
+    )
+    gdpr_consent = models.BooleanField(
+        default=False,
+        help_text=_('GDPR consent obtained')
+    )
+    terms_accepted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=_('When terms were accepted')
+    )
+    
+    # Custom Fields (for extensibility)
+    custom_settings = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Custom settings specific to the organization')
+    )
+    
+    class Meta:
+        db_table = 'organization_settings'
+        verbose_name = _('organization settings')
+        verbose_name_plural = _('organization settings')
+
+    def __str__(self):
+        return f"Settings for {self.organization.name}"
+    
+    def get_setting(self, key, default=None):
+        """Get a custom setting value."""
+        return self.custom_settings.get(key, default)
+    
+    def set_setting(self, key, value):
+        """Set a custom setting value."""
+        self.custom_settings[key] = value
+        self.save(update_fields=['custom_settings'])
+```
+
+### `apps/organizations/managers.py`
+
+```python
+"""
+Custom managers for Organization models.
+"""
+from django.db import models
+from django.db.models import Q, Count, Prefetch
+from apps.core.managers import SoftDeleteManager, TenantManager
+
+
+class OrganizationQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for Organization model.
+    """
+    def active(self):
+        """Return only active organizations."""
+        return self.filter(status='active')
+    
+    def with_member_count(self):
+        """Annotate with member count."""
+        return self.annotate(
+            total_members=Count('members', filter=Q(members__status='active'))
+        )
+    
+    def for_user(self, user):
+        """Return organizations for a specific user."""
+        return self.filter(
+            members__user=user,
+            members__status='active'
+        ).distinct()
+    
+    def owned_by(self, user):
+        """Return organizations owned by a user."""
+        return self.filter(owner=user)
+    
+    def prefetch_all(self):
+        """Prefetch related objects for performance."""
+        from apps.teams.models import Team
+        
+        return self.prefetch_related(
+            'members',
+            'members__user',
+            'settings',
+            Prefetch('teams', queryset=Team.objects.select_related('organization'))
+        ).select_related('owner')
+
+
+class OrganizationManager(SoftDeleteManager):
+    """
+    Custom manager for Organization model.
+    """
+    def get_queryset(self):
+        return OrganizationQuerySet(self.model, using=self._db).filter(is_deleted=False)
+    
+    def active(self):
+        return self.get_queryset().active()
+    
+    def for_user(self, user):
+        return self.get_queryset().for_user(user)
+    
+    def create_with_owner(self, owner, **kwargs):
+        """Create organization with owner as first member."""
+        from django.db import transaction
+        
+        with transaction.atomic():
+            organization = self.create(owner=owner, **kwargs)
+            
+            # Create owner membership
+            OrganizationMember.objects.create(
+                organization=organization,
+                user=owner,
+                role='owner',
+                status='active'
+            )
+            
+            # Create default settings
+            from .models import OrganizationSettings
+            OrganizationSettings.objects.create(organization=organization)
+            
+            return organization
+
+
+class OrganizationMemberQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for OrganizationMember model.
+    """
+    def active(self):
+        """Return only active members."""
+        return self.filter(status='active')
+    
+    def owners(self):
+        """Return only owners."""
+        return self.filter(role='owner')
+    
+    def admins(self):
+        """Return members with admin privileges."""
+        return self.filter(role__in=['owner', 'admin'])
+    
+    def with_user(self):
+        """Select related user."""
+        return self.select_related('user')
+    
+    def with_organization(self):
+        """Select related organization."""
+        return self.select_related('organization')
+
+
+class OrganizationMemberManager(models.Manager):
+    """
+    Custom manager for OrganizationMember model.
+    """
+    def get_queryset(self):
+        return OrganizationMemberQuerySet(self.model, using=self._db)
+    
+    def active(self):
+        return self.get_queryset().active()
+    
+    def get_membership(self, organization, user):
+        """Get membership for user in organization."""
+        try:
+            return self.get(
+                organization=organization,
+                user=user,
+                status='active'
+            )
+        except self.model.DoesNotExist:
+            return None
+    
+    def is_member(self, organization, user):
+        """Check if user is member of organization."""
+        return self.filter(
+            organization=organization,
+            user=user,
+            status='active'
+        ).exists()
+    
+    def is_admin(self, organization, user):
+        """Check if user is admin of organization."""
+        return self.filter(
+            organization=organization,
+            user=user,
+            role__in=['owner', 'admin'],
+            status='active'
+        ).exists()
+```
+
+---
+
+## Organizations Serializers
+
+### `apps/organizations/serializers.py`
+
+```python
+"""
+Organization serializers.
+"""
+from rest_framework import serializers
+from django.db import transaction
+from django.utils.translation import gettext_lazy as _
+from apps.authentication.models import User
+from apps.authentication.serializers import UserSerializer
+from .models import Organization, OrganizationMember, OrganizationSettings
+from .services import OrganizationService
+
+
+class OrganizationSettingsSerializer(serializers.ModelSerializer):
+    """
+    Serializer for OrganizationSettings model.
+    """
+    class Meta:
+        model = OrganizationSettings
+        fields = [
+            'timezone',
+            'locale',
+            'date_format',
+            'time_format',
+            'require_2fa',
+            'allowed_email_domains',
+            'ip_whitelist',
+            'session_timeout_minutes',
+            'enabled_features',
+            'notification_channels',
+            'weekly_digest',
+            'invoice_prefix',
+            'invoice_notes',
+            'auto_recharge',
+            'auto_recharge_amount',
+            'data_retention_days',
+            'custom_settings',
+        ]
+
+
+class OrganizationSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Organization model.
+    """
+    owner = UserSerializer(read_only=True)
+    owner_id = serializers.UUIDField(write_only=True, required=False)
+    member_count = serializers.IntegerField(read_only=True)
+    is_trial = serializers.BooleanField(read_only=True)
+    can_add_member = serializers.BooleanField(read_only=True)
+    settings = OrganizationSettingsSerializer(read_only=True)
+    
+    class Meta:
+        model = Organization
+        fields = [
+            'id',
+            'name',
+            'slug',
+            'description',
+            'owner',
+            'owner_id',
+            'tier',
+            'status',
+            'trial_ends_at',
+            'logo_url',
+            'website',
+            'billing_email',
+            'support_email',
+            'country',
+            'address_line1',
+            'address_line2',
+            'city',
+            'state_province',
+            'postal_code',
+            'tax_id',
+            'max_members',
+            'max_teams',
+            'max_projects',
+            'member_count',
+            'is_trial',
+            'can_add_member',
+            'settings',
+            'metadata',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'slug',
+            'owner',
+            'tier',
+            'status',
+            'trial_ends_at',
+            'member_count',
+            'is_trial',
+            'can_add_member',
+            'settings',
+            'created_at',
+            'updated_at',
+        ]
+    
+    def validate_name(self, value):
+        """Validate organization name."""
+        if len(value) < 2:
+            raise serializers.ValidationError(
+                _("Organization name must be at least 2 characters long.")
+            )
+        return value
+    
+    def validate_slug(self, value):
+        """Validate slug is unique."""
+        if self.instance:
+            # Update - exclude current instance
+            if Organization.objects.exclude(id=self.instance.id).filter(slug=value).exists():
+                raise serializers.ValidationError(
+                    _("An organization with this slug already exists.")
+                )
+        else:
+            # Create
+            if Organization.objects.filter(slug=value).exists():
+                raise serializers.ValidationError(
+                    _("An organization with this slug already exists.")
+                )
+        return value
+
+
+class OrganizationCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating an organization.
+    """
+    class Meta:
+        model = Organization
+        fields = [
+            'name',
+            'slug',
+            'description',
+            'website',
+            'billing_email',
+            'support_email',
+        ]
+        extra_kwargs = {
+            'slug': {'required': False},
+        }
+    
+    def create(self, validated_data):
+        """Create organization with owner."""
+        request = self.context['request']
+        
+        with transaction.atomic():
+            # Create organization
+            organization = Organization.objects.create_with_owner(
+                owner=request.user,
+                **validated_data
+            )
+            
+            return organization
+
+
+class OrganizationUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for updating organization.
+    """
+    class Meta:
+        model = Organization
+        fields = [
+            'name',
+            'description',
+            'logo_url',
+            'website',
+            'billing_email',
+            'support_email',
+            'country',
+            'address_line1',
+            'address_line2',
+            'city',
+            'state_province',
+            'postal_code',
+            'tax_id',
+        ]
+
+
+class OrganizationMemberSerializer(serializers.ModelSerializer):
+    """
+    Serializer for OrganizationMember model.
+    """
+    user = UserSerializer(read_only=True)
+    organization = serializers.StringRelatedField(read_only=True)
+    invited_by = UserSerializer(read_only=True)
+    
+    class Meta:
+        model = OrganizationMember
+        fields = [
+            'id',
+            'organization',
+            'user',
+            'role',
+            'status',
+            'joined_at',
+            'invited_by',
+            'is_owner',
+            'is_admin',
+            'can_manage_members',
+            'can_manage_billing',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id',
+            'organization',
+            'user',
+            'joined_at',
+            'invited_by',
+            'is_owner',
+            'is_admin',
+            'can_manage_members',
+            'can_manage_billing',
+            'created_at',
+        ]
+
+
+class OrganizationMemberUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for updating organization member.
+    """
+    class Meta:
+        model = OrganizationMember
+        fields = ['role', 'status']
+    
+    def validate_role(self, value):
+        """Validate role change."""
+        request = self.context['request']
+        instance = self.instance
+        
+        # Can't change owner role through this endpoint
+        if instance.role == 'owner' or value == 'owner':
+            raise serializers.ValidationError(
+                _("Owner role cannot be changed through this endpoint.")
+            )
+        
+        # Check if user has permission to change roles
+        membership = OrganizationMember.objects.get_membership(
+            organization=instance.organization,
+            user=request.user
+        )
+        
+        if not membership or not membership.can_manage_members:
+            raise serializers.ValidationError(
+                _("You don't have permission to change member roles.")
+            )
+        
+        return value
+
+
+class OrganizationTransferOwnershipSerializer(serializers.Serializer):
+    """
+    Serializer for transferring organization ownership.
+    """
+    new_owner_id = serializers.UUIDField()
+    
+    def validate_new_owner_id(self, value):
+        """Validate new owner."""
+        try:
+            user = User.objects.get(id=value)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(_("User not found."))
+        
+        organization = self.context['organization']
+        
+        # Check if user is a member
+        if not OrganizationMember.objects.is_member(organization, user):
+            raise serializers.ValidationError(
+                _("New owner must be a member of the organization.")
+            )
+        
+        # Can't transfer to current owner
+        if organization.owner == user:
+            raise serializers.ValidationError(
+                _("User is already the owner of this organization.")
+            )
+        
+        return user
+
+
+class OrganizationListSerializer(serializers.ModelSerializer):
+    """
+    Lightweight serializer for listing organizations.
+    """
+    member_count = serializers.IntegerField(read_only=True)
+    current_user_role = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Organization
+        fields = [
+            'id',
+            'name',
+            'slug',
+            'logo_url',
+            'tier',
+            'status',
+            'member_count',
+            'current_user_role',
+            'created_at',
+        ]
+    
+    def get_current_user_role(self, obj):
+        """Get current user's role in the organization."""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return None
+        
+        membership = OrganizationMember.objects.get_membership(
+            organization=obj,
+            user=request.user
+        )
+        return membership.role if membership else None
+```
+
+---
+
+## Organizations Services
+
+### `apps/organizations/services.py`
+
+```python
+"""
+Organization business logic services.
+"""
+import logging
+from typing import Optional, List
+from django.db import transaction
+from django.utils import timezone
+from apps.core.exceptions import ServiceException, PermissionDeniedException
+from apps.authentication.models import User
+from .models import Organization, OrganizationMember, OrganizationSettings
+
+logger = logging.getLogger(__name__)
+
+
+class OrganizationService:
+    """
+    Service for handling organization operations.
+    """
+    
+    @staticmethod
+    def create_organization(
+        owner: User,
+        name: str,
+        slug: Optional[str] = None,
+        **kwargs
+    ) -> Organization:
+        """
+        Create a new organization.
+        """
+        with transaction.atomic():
+            # Check if user has reached organization limit
+            owned_orgs = Organization.objects.owned_by(owner).count()
+            
+            # Free tier limit (adjust based on your business rules)
+            if owned_orgs >= 3:
+                raise ServiceException(
+                    "You have reached the maximum number of organizations for your account."
+                )
+            
+            # Create organization
+            organization = Organization.objects.create_with_owner(
+                owner=owner,
+                name=name,
+                slug=slug,
+                **kwargs
+            )
+            
+            # Set trial period if applicable
+            if organization.tier == 'free':
+                organization.trial_ends_at = timezone.now() + timezone.timedelta(days=14)
+                organization.status = 'trial'
+                organization.save(update_fields=['trial_ends_at', 'status'])
+            
+            logger.info(f"Organization created: {organization.name}", extra={
+                'organization_id': str(organization.id),
+                'owner_id': str(owner.id),
+            })
+            
+            # Send welcome email (async)
+            from .tasks import send_organization_welcome_email
+            send_organization_welcome_email.delay(str(organization.id))
+            
+            return organization
+    
+    @staticmethod
+    def update_organization(
+        organization: Organization,
+        user: User,
+        **kwargs
+    ) -> Organization:
+        """
+        Update organization details.
+        """
+        # Check permissions
+        membership = OrganizationMember.objects.get_membership(organization, user)
+        if not membership or not membership.is_admin:
+            raise PermissionDeniedException(
+                "You don't have permission to update this organization."
+            )
+        
+        # Update fields
+        for field, value in kwargs.items():
+            if hasattr(organization, field):
+                setattr(organization, field, value)
+        
+        organization.save()
+        
+        logger.info(f"Organization updated: {organization.name}", extra={
+            'organization_id': str(organization.id),
+            'updated_by': str(user.id),
+        })
+        
+        return organization
+    
+    @staticmethod
+    def suspend_organization(
+        organization: Organization,
+        reason: Optional[str] = None
+    ) -> None:
+        """
+        Suspend an organization (admin only).
+        """
+        with transaction.atomic():
+            organization.status = 'suspended'
+            organization.save(update_fields=['status', 'updated_at'])
+            
+            # Suspend all members except owner
+            OrganizationMember.objects.filter(
+                organization=organization
+            ).exclude(role='owner').update(status='suspended')
+            
+            logger.warning(f"Organization suspended: {organization.name}", extra={
+                'organization_id': str(organization.id),
+                'reason': reason,
+            })
+            
+            # Notify owner
+            from .tasks import send_organization_suspended_email
+            send_organization_suspended_email.delay(str(organization.id), reason)
+    
+    @staticmethod
+    def activate_organization(organization: Organization) -> None:
+        """
+        Activate a suspended organization.
+        """
+        with transaction.atomic():
+            organization.status = 'active'
+            organization.save(update_fields=['status', 'updated_at'])
+            
+            # Reactivate members
+            OrganizationMember.objects.filter(
+                organization=organization,
+                status='suspended'
+            ).update(status='active')
+            
+            logger.info(f"Organization activated: {organization.name}", extra={
+                'organization_id': str(organization.id),
+            })
+    
+    @staticmethod
+    def delete_organization(
+        organization: Organization,
+        user: User,
+        confirm_name: str
+    ) -> None:
+        """
+        Delete an organization (soft delete).
+        """
+        # Must be owner
+        if organization.owner != user:
+            raise PermissionDeniedException(
+                "Only the owner can delete the organization."
+            )
+        
+        # Confirm organization name
+        if confirm_name != organization.name:
+            raise ServiceException(
+                "Organization name confirmation does not match."
+            )
+        
+        with transaction.atomic():
+            # Cancel subscriptions
+            # TODO: Implement when billing is added
+            
+            # Soft delete
+            organization.delete()
+            
+            logger.info(f"Organization deleted: {organization.name}", extra={
+                'organization_id': str(organization.id),
+                'deleted_by': str(user.id),
+            })
+            
+            # Send confirmation email
+            from .tasks import send_organization_deleted_email
+            send_organization_deleted_email.delay(str(user.id), organization.name)
+    
+    @staticmethod
+    def get_user_organizations(user: User) -> List[Organization]:
+        """
+        Get all organizations for a user.
+        """
+        return Organization.objects.for_user(user).prefetch_all()
+
+
+class OrganizationMemberService:
+    """
+    Service for managing organization members.
+    """
+    
+    @staticmethod
+    def add_member(
+        organization: Organization,
+        user: User,
+        role: str = 'member',
+        invited_by: Optional[User] = None
+    ) -> OrganizationMember:
+        """
+        Add a user to an organization.
+        """
+        # Check if already a member
+        if OrganizationMember.objects.is_member(organization, user):
+            raise ServiceException("User is already a member of this organization.")
+        
+        # Check organization limits
+        if not organization.can_add_member:
+            raise ServiceException(
+                f"Organization has reached the maximum number of members ({organization.max_members})."
+            )
+        
+        with transaction.atomic():
+            member = OrganizationMember.objects.create(
+                organization=organization,
+                user=user,
+                role=role,
+                status='active',
+                invited_by=invited_by
+            )
+            
+            logger.info(f"Member added to organization: {user.email}", extra={
+                'organization_id': str(organization.id),
+                'user_id': str(user.id),
+                'role': role,
+            })
+            
+            # Send welcome email
+            from .tasks import send_member_welcome_email
+            send_member_welcome_email.delay(str(member.id))
+            
+            return member
+    
+    @staticmethod
+    def update_member_role(
+        organization: Organization,
+        user: User,
+        new_role: str,
+        updated_by: User
+    ) -> OrganizationMember:
+        """
+        Update a member's role.
+        """
+        # Check permissions
+        updater_membership = OrganizationMember.objects.get_membership(
+            organization, updated_by
+        )
+        if not updater_membership or not updater_membership.can_manage_members:
+            raise PermissionDeniedException(
+                "You don't have permission to update member roles."
+            )
+        
+        # Get member
+        member = OrganizationMember.objects.get_membership(organization, user)
+        if not member:
+            raise ServiceException("User is not a member of this organization.")
+        
+        # Can't change owner role
+        if member.role == 'owner' or new_role == 'owner':
+            raise ServiceException(
+                "Owner role changes must use the transfer ownership endpoint."
+            )
+        
+        # Update role
+        old_role = member.role
+        member.role = new_role
+        member.save(update_fields=['role', 'updated_at'])
+        
+        # Update cached permissions
+        member.update_cached_permissions()
+        
+        logger.info(f"Member role updated: {user.email}", extra={
+            'organization_id': str(organization.id),
+            'user_id': str(user.id),
+            'old_role': old_role,
+            'new_role': new_role,
+            'updated_by': str(updated_by.id),
+        })
+        
+        return member
+    
+    @staticmethod
+    def remove_member(
+        organization: Organization,
+        user: User,
+        removed_by: User
+    ) -> None:
+        """
+        Remove a member from organization.
+        """
+        # Check permissions
+        remover_membership = OrganizationMember.objects.get_membership(
+            organization, removed_by
+        )
+        if not remover_membership or not remover_membership.can_manage_members:
+            # Users can remove themselves
+            if user != removed_by:
+                raise PermissionDeniedException(
+                    "You don't have permission to remove members."
+                )
+        
+        # Get member
+        member = OrganizationMember.objects.get_membership(organization, user)
+        if not member:
+            raise ServiceException("User is not a member of this organization.")
+        
+        # Can't remove owner
+        if member.role == 'owner':
+            raise ServiceException(
+                "Organization owner cannot be removed. Transfer ownership first."
+            )
+        
+        with transaction.atomic():
+            # Update status instead of deleting
+            member.status = 'removed'
+            member.save(update_fields=['status', 'updated_at'])
+            
+            # Remove from all teams
+            from apps.teams.models import TeamMember
+            TeamMember.objects.filter(
+                team__organization=organization,
+                user=user
+            ).delete()
+            
+            logger.info(f"Member removed from organization: {user.email}", extra={
+                'organization_id': str(organization.id),
+                'user_id': str(user.id),
+                'removed_by': str(removed_by.id),
+            })
+            
+            # Send notification
+            from .tasks import send_member_removed_email
+            send_member_removed_email.delay(
+                str(user.id),
+                organization.name
+            )
+    
+    @staticmethod
+    def suspend_member(
+        organization: Organization,
+        user: User,
+        suspended_by: User,
+        reason: Optional[str] = None
+    ) -> OrganizationMember:
+        """
+        Suspend a member.
+        """
+        # Check permissions
+        suspender_membership = OrganizationMember.objects.get_membership(
+            organization, suspended_by
+        )
+        if not suspender_membership or not suspender_membership.can_manage_members:
+            raise PermissionDeniedException(
+                "You don't have permission to suspend members."
+            )
+        
+        # Get member
+        member = OrganizationMember.objects.get_membership(organization, user)
+        if not member:
+            raise ServiceException("User is not a member of this organization.")
+        
+        # Can't suspend owner
+        if member.role == 'owner':
+            raise ServiceException("Organization owner cannot be suspended.")
+        
+        # Suspend
+        member.status = 'suspended'
+        member.save(update_fields=['status', 'updated_at'])
+        
+        logger.warning(f"Member suspended: {user.email}", extra={
+            'organization_id': str(organization.id),
+            'user_id': str(user.id),
+            'suspended_by': str(suspended_by.id),
+            'reason': reason,
+        })
+        
+        # Send notification
+        from .tasks import send_member_suspended_email
+        send_member_suspended_email.delay(str(member.id), reason)
+        
+        return member
+    
+    @staticmethod
+    def activate_member(
+        organization: Organization,
+        user: User,
+        activated_by: User
+    ) -> OrganizationMember:
+        """
+        Activate a suspended member.
+        """
+        # Check permissions
+        activator_membership = OrganizationMember.objects.get_membership(
+            organization, activated_by
+        )
+        if not activator_membership or not activator_membership.can_manage_members:
+            raise PermissionDeniedException(
+                "You don't have permission to activate members."
+            )
+        
+        # Get member
+        member = OrganizationMember.objects.get(
+            organization=organization,
+            user=user,
+            status='suspended'
+        )
+        
+        # Activate
+        member.status = 'active'
+        member.save(update_fields=['status', 'updated_at'])
+        
+        logger.info(f"Member activated: {user.email}", extra={
+            'organization_id': str(organization.id),
+            'user_id': str(user.id),
+            'activated_by': str(activated_by.id),
+        })
+        
+        return member
+
+
+class OrganizationSettingsService:
+    """
+    Service for managing organization settings.
+    """
+    
+    @staticmethod
+    def update_settings(
+        organization: Organization,
+        user: User,
+        **settings
+    ) -> OrganizationSettings:
+        """
+        Update organization settings.
+        """
+        # Check permissions
+        membership = OrganizationMember.objects.get_membership(organization, user)
+        if not membership or not membership.is_admin:
+            raise PermissionDeniedException(
+                "You don't have permission to update organization settings."
+            )
+        
+        org_settings, created = OrganizationSettings.objects.get_or_create(
+            organization=organization
+        )
+        
+        # Update settings
+        for key, value in settings.items():
+            if hasattr(org_settings, key):
+                setattr(org_settings, key, value)
+        
+        org_settings.save()
+        
+        logger.info(f"Organization settings updated: {organization.name}", extra={
+            'organization_id': str(organization.id),
+            'updated_by': str(user.id),
+        })
+        
+        return org_settings
+```
+
+## Organization Permissions
+
+### `apps/organizations/permissions.py`
+
+```python
+"""
+Custom permissions for organizations app.
+"""
+from rest_framework import permissions
+from apps.organizations.models import OrganizationMember
+
+
+class IsOrganizationAdmin(permissions.BasePermission):
+    """
+    Allows access only to organization admins or owners.
+    """
+    def has_permission(self, request, view):
+        org_id = request.tenant_context.get('organization_id')
+        if not org_id:
+            return False
+
+        return OrganizationMember.objects.is_admin(org_id, request.user)
+```
+
+---
+
+## Organization URLs
+
+### `apps/organizations/urls.py`
+
+```python
+from django.urls import path
+
+from .views import (
+    OrganizationListView,
+    OrganizationCreateView,
+    OrganizationDetailView,
+    OrganizationUpdateView,
+    OrganizationDeleteView,
+    OrganizationMembersListView,
+    OrganizationMemberUpdateView,
+    OrganizationTransferOwnershipView,
+    OrganizationSettingsView,
+)
+
+app_name = 'organizations'
+
+urlpatterns = [
+    path('organizations/', OrganizationListView.as_view(), name='list'),
+    path('organizations/create/', OrganizationCreateView.as_view(), name='create'),
+    path('organizations/<uuid:org_id>/', OrganizationDetailView.as_view(), name='detail'),
+    path('organizations/<uuid:org_id>/update/', OrganizationUpdateView.as_view(), name='update'),
+    path('organizations/<uuid:org_id>/delete/', OrganizationDeleteView.as_view(), name='delete'),
+    path('organizations/<uuid:org_id>/members/', OrganizationMembersListView.as_view(), name='members'),
+    path('organizations/<uuid:org_id>/members/<uuid:user_id>/update/', OrganizationMemberUpdateView.as_view(), name='update-member'),
+    path('organizations/<uuid:org_id>/transfer-ownership/', OrganizationTransferOwnershipView.as_view(), name='transfer-ownership'),
+    path('organizations/<uuid:org_id>/settings/', OrganizationSettingsView.as_view(), name='settings'),
+]
+```
+
+---
+
+## Organization Views
+
+Basic versions — each has relevant logic from data to response.
+
+### `apps/organizations/views.py` (Partial)
+
+```python
+from rest_framework import status, generics
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+
+from .models import Organization, OrganizationMember, OrganizationSettings
+from .serializers import (
+    OrganizationSerializer,
+    OrganizationCreateSerializer,
+    OrganizationUpdateSerializer,
+    OrganizationListSerializer,
+    OrganizationMemberSerializer,
+    OrganizationMemberUpdateSerializer,
+    OrganizationTransferOwnershipSerializer,
+    OrganizationSettingsSerializer,
+)
+from .services import (
+    OrganizationService,
+    OrganizationMemberService,
+    OrganizationSettingsService,
+)
+from apps.core.permissions import IsOrganizationMember
+
+class OrganizationListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = OrganizationListSerializer
+
+    def get_queryset(self):
+        return OrganizationService.get_user_organizations(self.request.user)
+
+class OrganizationCreateView(generics.CreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = OrganizationCreateSerializer
+
+    def perform_create(self, serializer):
+        serializer.save()
+
+class OrganizationDetailView(generics.RetrieveAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = OrganizationSerializer
+    lookup_url_kwarg = 'org_id'
+
+    def get_queryset(self):
+        return Organization.objects.for_user(self.request.user)
+
+class OrganizationUpdateView(generics.UpdateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = OrganizationUpdateSerializer
+    lookup_url_kwarg = 'org_id'
+
+    def get_queryset(self):
+        return Organization.objects.for_user(self.request.user)
+
+class OrganizationDeleteView(generics.DestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    lookup_url_kwarg = 'org_id'
+
+    def perform_destroy(self, instance):
+        OrganizationService.delete_organization(instance, self.request.user, confirm_name=instance.name)
+
+class OrganizationMembersListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = OrganizationMemberSerializer
+    lookup_url_kwarg = 'org_id'
+
+    def get_queryset(self):
+        return OrganizationMember.objects.filter(
+            organization_id=self.kwargs['org_id'],
+            status='active'
+        )
+
+class OrganizationMemberUpdateView(generics.UpdateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = OrganizationMemberUpdateSerializer
+    lookup_url_kwarg = 'user_id'
+
+    def get_object(self):
+        return OrganizationMember.objects.get(
+            organization_id=self.kwargs['org_id'],
+            user_id=self.kwargs['user_id'],
+        )
+
+class OrganizationTransferOwnershipView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = OrganizationTransferOwnershipSerializer
+
+    def post(self, request, org_id):
+        organization = Organization.objects.get(id=org_id)
+
+        self.check_object_permissions(request, organization)
+
+        serializer = self.get_serializer(data=request.data, context={"organization": organization})
+        serializer.is_valid(raise_exception=True)
+        new_owner = serializer.validated_data['new_owner_id']
+
+        organization.transfer_ownership(new_owner)
+        return Response({"message": "Ownership transferred successfully"})
+
+class OrganizationSettingsView(generics.RetrieveUpdateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = OrganizationSettingsSerializer
+    lookup_url_kwarg = 'org_id'
+
+    def get_object(self):
+        return OrganizationSettings.objects.get_or_create(
+            organization_id=self.kwargs['org_id']
+        )[0]
+```
+
+---
+
+## Organization Tasks (Emails)
+
+### `apps/organizations/tasks.py`
+
+```python
+"""
+Tasks for organizations.
+"""
+from celery import shared_task
+from django.core.mail import send_mail
+from django.conf import settings
+import logging
+
+logger = logging.getLogger(__name__)
+
+@shared_task
+def send_organization_welcome_email(org_id):
+    """Send welcome email when organization is created."""
+    # Later: fetch org & owner and send an informative welcome email
+    ...
+
+@shared_task
+def send_organization_suspended_email(org_id, reason):
+    """Notify organization owner organization was suspended"""
+    ...
+
+@shared_task
+def send_organization_deleted_email(user_id, org_name):
+    """Notify user organization was deleted"""
+    ...
+
+@shared_task
+def send_member_welcome_email(member_id):
+    """Send welcome email to member"""
+    ...
+
+@shared_task
+def send_member_removed_email(user_id, org_name):
+    """Send notification to removed member"""
+    ...
+
+@shared_task
+def send_member_suspended_email(member_id, reason=None):
+    """Notify member suspended from organization"""
+    ...
+```
+
+---
+
+## Phase 3 Part 2 Recap
+
+So far we've implemented:
+- ✅ Organizations models, services
+- ✅ Membership system & permissions
+- ✅ Organizations API endpoints
+- ✅ Settings support
+- ✅ Organization transfer, suspend, delete, audit
+- ✅ Ready structure for emails via Celery

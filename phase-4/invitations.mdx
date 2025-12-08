@@ -1,0 +1,1796 @@
+---
+title: 'Invitations'
+description: 'Now I'll build the **Invitations system** for inviting users to organizations.'
+sidebarTitle: "Invitations"
+---
+
+## Invitations App Structure
+
+```
+apps/invitations/
+├── __init__.py
+├── apps.py
+├── models.py          # Invitation model
+├── managers.py        # Custom managers
+├── serializers.py     # Invitation serializers
+├── views.py           # Invitation views
+├── urls.py            # Invitation URLs
+├── services.py        # Business logic
+├── tasks.py           # Email tasks
+├── signals.py         # Invitation signals
+└── admin.py
+```
+
+---
+
+## Invitations Models
+
+### `apps/invitations/apps.py`
+
+```python
+from django.apps import AppConfig
+
+
+class InvitationsConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.invitations'
+    verbose_name = 'Invitations'
+
+    def ready(self):
+        """Import signals when app is ready."""
+        import apps.invitations.signals  # noqa
+```
+
+### `apps/invitations/models.py`
+
+```python
+"""
+Invitation models for inviting users to organizations.
+"""
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+from django.utils import timezone
+from django.conf import settings
+from apps.core.models import BaseModel
+from apps.core.utils import generate_random_token, generate_secure_hash
+from apps.organizations.models import Organization
+from apps.authentication.models import User
+from .managers import InvitationManager
+
+
+class Invitation(BaseModel):
+    """
+    Invitation model for inviting users to organizations.
+    """
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('accepted', 'Accepted'),
+        ('declined', 'Declined'),
+        ('cancelled', 'Cancelled'),
+        ('expired', 'Expired'),
+    ]
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='invitations',
+        help_text=_('Organization to invite user to')
+    )
+    email = models.EmailField(
+        _('email address'),
+        db_index=True,
+        help_text=_('Email address of the invitee')
+    )
+    
+    # Role assignment
+    role = models.CharField(
+        max_length=20,
+        default='member',
+        help_text=_('Role to assign when invitation is accepted')
+    )
+    
+    # Custom role (from RBAC)
+    custom_role = models.ForeignKey(
+        'rbac.Role',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='invitations',
+        help_text=_('Custom role to assign')
+    )
+    
+    # Teams to add user to
+    teams = models.ManyToManyField(
+        'teams.Team',
+        blank=True,
+        related_name='invitations',
+        help_text=_('Teams to add user to upon acceptance')
+    )
+    
+    # Token for secure invitation link
+    token = models.CharField(
+        max_length=100,
+        unique=True,
+        db_index=True,
+        editable=False
+    )
+    token_hash = models.CharField(
+        max_length=255,
+        unique=True,
+        editable=False
+    )
+    
+    # Status tracking
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending',
+        db_index=True
+    )
+    
+    # Who invited
+    invited_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='invitations_sent',
+        help_text=_('User who sent the invitation')
+    )
+    
+    # Personal message
+    message = models.TextField(
+        blank=True,
+        help_text=_('Optional personal message to include in invitation')
+    )
+    
+    # Expiration
+    expires_at = models.DateTimeField(
+        db_index=True,
+        help_text=_('When this invitation expires')
+    )
+    
+    # Response tracking
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    declined_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    
+    # Metadata
+    metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Additional metadata')
+    )
+    
+    # Tracking
+    sent_at = models.DateTimeField(null=True, blank=True)
+    resent_count = models.PositiveIntegerField(default=0)
+    last_resent_at = models.DateTimeField(null=True, blank=True)
+
+    objects = InvitationManager()
+
+    class Meta:
+        db_table = 'invitations'
+        verbose_name = _('invitation')
+        verbose_name_plural = _('invitations')
+        indexes = [
+            models.Index(fields=['organization', 'status']),
+            models.Index(fields=['email', 'status']),
+            models.Index(fields=['token_hash']),
+            models.Index(fields=['expires_at']),
+        ]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Invitation to {self.email} for {self.organization.name}"
+
+    @classmethod
+    def create_invitation(
+        cls,
+        organization,
+        email,
+        invited_by,
+        role='member',
+        custom_role=None,
+        message='',
+        teams=None
+    ):
+        """
+        Create a new invitation with token.
+        """
+        from datetime import timedelta
+        
+        token = generate_random_token(32)
+        token_hash = generate_secure_hash(token)
+        
+        invitation = cls.objects.create(
+            organization=organization,
+            email=email.lower(),
+            role=role,
+            custom_role=custom_role,
+            invited_by=invited_by,
+            message=message,
+            token=token,
+            token_hash=token_hash,
+            expires_at=timezone.now() + timedelta(
+                days=settings.INVITATION_EXPIRY_DAYS
+            )
+        )
+        
+        if teams:
+            invitation.teams.set(teams)
+        
+        return invitation, token
+
+    def mark_sent(self):
+        """Mark invitation as sent."""
+        self.sent_at = timezone.now()
+        self.save(update_fields=['sent_at'])
+
+    def accept(self, user=None):
+        """Mark invitation as accepted."""
+        self.status = 'accepted'
+        self.accepted_at = timezone.now()
+        self.save(update_fields=['status', 'accepted_at'])
+
+    def decline(self):
+        """Mark invitation as declined."""
+        self.status = 'declined'
+        self.declined_at = timezone.now()
+        self.save(update_fields=['status', 'declined_at'])
+
+    def cancel(self):
+        """Mark invitation as cancelled."""
+        self.status = 'cancelled'
+        self.cancelled_at = timezone.now()
+        self.save(update_fields=['status', 'cancelled_at'])
+
+    def resend(self):
+        """Resend invitation email."""
+        self.resent_count += 1
+        self.last_resent_at = timezone.now()
+        self.save(update_fields=['resent_count', 'last_resent_at'])
+
+    @property
+    def is_expired(self):
+        """Check if invitation has expired."""
+        return timezone.now() > self.expires_at
+
+    @property
+    def is_valid(self):
+        """Check if invitation is still valid."""
+        return (
+            self.status == 'pending' and
+            not self.is_expired
+        )
+
+    @property
+    def can_resend(self):
+        """Check if invitation can be resent."""
+        if not self.is_valid:
+            return False
+        
+        # Limit resends (e.g., max 3 times)
+        if self.resent_count >= 3:
+            return False
+        
+        # Throttle resends (e.g., 1 hour between resends)
+        if self.last_resent_at:
+            hours_since_resend = (timezone.now() - self.last_resent_at).total_seconds() / 3600
+            if hours_since_resend < 1:
+                return False
+        
+        return True
+```
+
+### `apps/invitations/managers.py`
+
+```python
+"""
+Custom managers for Invitation model.
+"""
+from django.db import models
+from django.utils import timezone
+
+
+class InvitationQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for Invitation model.
+    """
+    def pending(self):
+        """Return only pending invitations."""
+        return self.filter(status='pending', expires_at__gt=timezone.now())
+
+    def for_organization(self, organization):
+        """Filter by organization."""
+        return self.filter(organization=organization)
+
+    def for_email(self, email):
+        """Filter by email."""
+        return self.filter(email=email.lower())
+
+    def expired(self):
+        """Return expired invitations."""
+        return self.filter(status='pending', expires_at__lte=timezone.now())
+
+    def accepted(self):
+        """Return accepted invitations."""
+        return self.filter(status='accepted')
+
+    def recent(self, days=30):
+        """Return recent invitations."""
+        cutoff = timezone.now() - timezone.timedelta(days=days)
+        return self.filter(created_at__gte=cutoff)
+
+
+class InvitationManager(models.Manager):
+    """
+    Custom manager for Invitation model.
+    """
+    def get_queryset(self):
+        return InvitationQuerySet(self.model, using=self._db)
+
+    def pending(self):
+        return self.get_queryset().pending()
+
+    def for_organization(self, organization):
+        return self.get_queryset().for_organization(organization)
+
+    def for_email(self, email):
+        return self.get_queryset().for_email(email)
+
+    def get_by_token(self, token):
+        """Get invitation by token."""
+        from apps.core.utils import generate_secure_hash
+        
+        token_hash = generate_secure_hash(token)
+        try:
+            return self.get(token_hash=token_hash)
+        except self.model.DoesNotExist:
+            return None
+
+    def cleanup_expired(self):
+        """Mark expired invitations as expired."""
+        expired = self.get_queryset().expired()
+        count = expired.update(status='expired')
+        return count
+```
+
+---
+
+## Invitations Serializers
+
+### `apps/invitations/serializers.py`
+
+```python
+"""
+Invitation serializers.
+"""
+from rest_framework import serializers
+from django.utils.translation import gettext_lazy as _
+from django.core.validators import EmailValidator
+from apps.authentication.serializers import UserSerializer
+from apps.organizations.models import Organization
+from apps.teams.models import Team
+from .models import Invitation
+
+
+class InvitationSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Invitation model.
+    """
+    organization = serializers.StringRelatedField(read_only=True)
+    invited_by = UserSerializer(read_only=True)
+    teams = serializers.StringRelatedField(many=True, read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
+    is_valid = serializers.BooleanField(read_only=True)
+    can_resend = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Invitation
+        fields = [
+            'id',
+            'organization',
+            'email',
+            'role',
+            'custom_role',
+            'teams',
+            'status',
+            'invited_by',
+            'message',
+            'expires_at',
+            'accepted_at',
+            'declined_at',
+            'cancelled_at',
+            'sent_at',
+            'resent_count',
+            'last_resent_at',
+            'is_expired',
+            'is_valid',
+            'can_resend',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id',
+            'organization',
+            'status',
+            'invited_by',
+            'expires_at',
+            'accepted_at',
+            'declined_at',
+            'cancelled_at',
+            'sent_at',
+            'resent_count',
+            'last_resent_at',
+            'is_expired',
+            'is_valid',
+            'can_resend',
+            'created_at',
+        ]
+
+
+class InvitationCreateSerializer(serializers.Serializer):
+    """
+    Serializer for creating an invitation.
+    """
+    email = serializers.EmailField(
+        validators=[EmailValidator()],
+        required=True
+    )
+    role = serializers.CharField(default='member')
+    custom_role_id = serializers.UUIDField(required=False, allow_null=True)
+    team_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        allow_empty=True
+    )
+    message = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=500
+    )
+
+    def validate_email(self, value):
+        """Validate email."""
+        from apps.organizations.models import OrganizationMember
+        from apps.authentication.models import User
+        
+        email = value.lower()
+        organization = self.context['organization']
+
+        # Check if user is already a member
+        try:
+            user = User.objects.get(email=email)
+            if OrganizationMember.objects.is_member(organization, user):
+                raise serializers.ValidationError(
+                    _("User is already a member of this organization.")
+                )
+        except User.DoesNotExist:
+            pass  # User doesn't exist yet, that's fine
+
+        # Check for pending invitation
+        pending_invitation = Invitation.objects.filter(
+            organization=organization,
+            email=email,
+            status='pending'
+        ).first()
+
+        if pending_invitation and pending_invitation.is_valid:
+            raise serializers.ValidationError(
+                _("A pending invitation already exists for this email.")
+            )
+
+        return email
+
+    def validate_custom_role_id(self, value):
+        """Validate custom role exists."""
+        if value is None:
+            return None
+
+        from apps.rbac.models import Role
+        organization = self.context['organization']
+
+        try:
+            role = Role.objects.get(id=value, organization=organization)
+            return role
+        except Role.DoesNotExist:
+            raise serializers.ValidationError(
+                _("Custom role not found in this organization.")
+            )
+
+    def validate_team_ids(self, value):
+        """Validate teams exist."""
+        if not value:
+            return []
+
+        organization = self.context['organization']
+        teams = Team.objects.filter(
+            id__in=value,
+            organization=organization,
+            status='active'
+        )
+
+        if teams.count() != len(value):
+            raise serializers.ValidationError(
+                _("Some teams were not found in this organization.")
+            )
+
+        return list(teams)
+
+
+class InvitationBulkCreateSerializer(serializers.Serializer):
+    """
+    Serializer for bulk creating invitations.
+    """
+    emails = serializers.ListField(
+        child=serializers.EmailField(validators=[EmailValidator()]),
+        min_length=1,
+        max_length=50
+    )
+    role = serializers.CharField(default='member')
+    custom_role_id = serializers.UUIDField(required=False, allow_null=True)
+    team_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        allow_empty=True
+    )
+    message = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=500
+    )
+
+
+class InvitationPublicSerializer(serializers.ModelSerializer):
+    """
+    Public serializer for invitation details (by token).
+    """
+    organization_name = serializers.CharField(source='organization.name', read_only=True)
+    organization_logo = serializers.URLField(source='organization.logo_url', read_only=True)
+    invited_by_name = serializers.CharField(source='invited_by.display_name', read_only=True)
+    role_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Invitation
+        fields = [
+            'id',
+            'organization_name',
+            'organization_logo',
+            'email',
+            'role',
+            'role_display',
+            'invited_by_name',
+            'message',
+            'expires_at',
+            'is_expired',
+            'created_at',
+        ]
+
+    def get_role_display(self, obj):
+        """Get human-readable role name."""
+        if obj.custom_role:
+            return obj.custom_role.name
+        return obj.role.replace('_', ' ').title()
+
+
+class InvitationAcceptSerializer(serializers.Serializer):
+    """
+    Serializer for accepting an invitation.
+    """
+    # No fields needed, token is in URL
+    pass
+
+
+class InvitationDeclineSerializer(serializers.Serializer):
+    """
+    Serializer for declining an invitation.
+    """
+    # No fields needed, token is in URL
+    pass
+```
+
+---
+
+## Invitations Services
+
+### `apps/invitations/services.py`
+
+```python
+"""
+Invitation business logic services.
+"""
+import logging
+from typing import Optional, List, Tuple
+from django.db import transaction
+from django.utils import timezone
+
+from apps.core.exceptions import ServiceException, PermissionDeniedException
+from apps.authentication.models import User
+from apps.organizations.models import Organization, OrganizationMember
+from apps.teams.models import Team, TeamMember
+from .models import Invitation
+
+logger = logging.getLogger(__name__)
+
+
+class InvitationService:
+    """
+    Service for handling invitation operations.
+    """
+
+    @staticmethod
+    def create_invitation(
+        organization: Organization,
+        email: str,
+        invited_by: User,
+        role: str = 'member',
+        custom_role=None,
+        teams: Optional[List[Team]] = None,
+        message: str = ''
+    ) -> Tuple[Invitation, str]:
+        """
+        Create and send an invitation.
+        Returns: (invitation, token)
+        """
+        # Check permissions
+        inviter_membership = OrganizationMember.objects.get_membership(
+            organization, invited_by
+        )
+        if not inviter_membership or not inviter_membership.can_manage_members:
+            raise PermissionDeniedException(
+                "You don't have permission to invite users."
+            )
+
+        # Check organization limits
+        if not organization.can_add_member:
+            raise ServiceException(
+                f"Organization has reached the maximum number of members ({organization.max_members})."
+            )
+
+        with transaction.atomic():
+            # Cancel any pending invitations for this email
+            Invitation.objects.filter(
+                organization=organization,
+                email=email.lower(),
+                status='pending'
+            ).update(status='cancelled', cancelled_at=timezone.now())
+
+            # Create invitation
+            invitation, token = Invitation.create_invitation(
+                organization=organization,
+                email=email.lower(),
+                invited_by=invited_by,
+                role=role,
+                custom_role=custom_role,
+                message=message,
+                teams=teams
+            )
+
+            logger.info(f"Invitation created: {email} to {organization.name}", extra={
+                'invitation_id': str(invitation.id),
+                'organization_id': str(organization.id),
+                'invited_by': str(invited_by.id),
+            })
+
+            # Send invitation email (async)
+            from .tasks import send_invitation_email
+            send_invitation_email.delay(str(invitation.id), token)
+            invitation.mark_sent()
+
+            return invitation, token
+
+    @staticmethod
+    def bulk_create_invitations(
+        organization: Organization,
+        emails: List[str],
+        invited_by: User,
+        role: str = 'member',
+        custom_role=None,
+        teams: Optional[List[Team]] = None,
+        message: str = ''
+    ) -> dict:
+        """
+        Create multiple invitations.
+        Returns dict with successful and failed invitations.
+        """
+        results = {
+            'successful': [],
+            'failed': []
+        }
+
+        for email in emails:
+            try:
+                invitation, token = InvitationService.create_invitation(
+                    organization=organization,
+                    email=email,
+                    invited_by=invited_by,
+                    role=role,
+                    custom_role=custom_role,
+                    teams=teams,
+                    message=message
+                )
+                results['successful'].append({
+                    'email': email,
+                    'invitation_id': str(invitation.id)
+                })
+            except Exception as e:
+                results['failed'].append({
+                    'email': email,
+                    'error': str(e)
+                })
+
+        return results
+
+    @staticmethod
+    def accept_invitation(invitation: Invitation, user: User) -> OrganizationMember:
+        """
+        Accept an invitation and add user to organization.
+        """
+        if not invitation.is_valid:
+            raise ServiceException("This invitation is no longer valid.")
+
+        # Verify email matches (for authenticated users)
+        if user.email.lower() != invitation.email.lower():
+            raise ServiceException(
+                "This invitation was sent to a different email address."
+            )
+
+        # Check if already a member
+        if OrganizationMember.objects.is_member(invitation.organization, user):
+            raise ServiceException(
+                "You are already a member of this organization."
+            )
+
+        with transaction.atomic():
+            # Create organization membership
+            member = OrganizationMember.objects.create(
+                organization=invitation.organization,
+                user=user,
+                role=invitation.role,
+                status='active',
+                invited_by=invitation.invited_by
+            )
+
+            # Assign custom role if specified
+            if invitation.custom_role:
+                from apps.rbac.models import UserRole
+                UserRole.objects.create(
+                    user=user,
+                    role=invitation.custom_role,
+                    organization=invitation.organization,
+                    granted_by=invitation.invited_by
+                )
+
+            # Add to teams
+            for team in invitation.teams.all():
+                TeamMember.objects.create(
+                    team=team,
+                    user=user,
+                    role='member',
+                    status='active',
+                    added_by=invitation.invited_by
+                )
+
+            # Mark invitation as accepted
+            invitation.accept(user)
+
+            logger.info(f"Invitation accepted: {user.email}", extra={
+                'invitation_id': str(invitation.id),
+                'organization_id': str(invitation.organization_id),
+                'user_id': str(user.id),
+            })
+
+            # Send welcome email
+            from .tasks import send_invitation_accepted_notification
+            send_invitation_accepted_notification.delay(
+                str(invitation.id),
+                str(user.id)
+            )
+
+            return member
+
+    @staticmethod
+    def decline_invitation(invitation: Invitation, reason: str = '') -> None:
+        """
+        Decline an invitation.
+        """
+        if not invitation.is_valid:
+            raise ServiceException("This invitation is no longer valid.")
+
+        invitation.decline()
+
+        logger.info(f"Invitation declined: {invitation.email}", extra={
+            'invitation_id': str(invitation.id),
+            'organization_id': str(invitation.organization_id),
+            'reason': reason,
+        })
+
+        # Notify inviter
+        from .tasks import send_invitation_declined_notification
+        send_invitation_declined_notification.delay(
+            str(invitation.id),
+            reason
+        )
+
+    @staticmethod
+    def cancel_invitation(
+        invitation: Invitation,
+        cancelled_by: User
+    ) -> None:
+        """
+        Cancel a pending invitation.
+        """
+        # Check permissions
+        canceller_membership = OrganizationMember.objects.get_membership(
+            invitation.organization, cancelled_by
+        )
+        
+        can_cancel = (
+            (canceller_membership and canceller_membership.can_manage_members) or
+            invitation.invited_by == cancelled_by
+        )
+
+        if not can_cancel:
+            raise PermissionDeniedException(
+                "You don't have permission to cancel this invitation."
+            )
+
+        if invitation.status != 'pending':
+            raise ServiceException("Only pending invitations can be cancelled.")
+
+        invitation.cancel()
+
+        logger.info(f"Invitation cancelled: {invitation.email}", extra={
+            'invitation_id': str(invitation.id),
+            'cancelled_by': str(cancelled_by.id),
+        })
+
+    @staticmethod
+    def resend_invitation(
+        invitation: Invitation,
+        resent_by: User
+    ) -> str:
+        """
+        Resend an invitation email.
+        Returns: new token
+        """
+        # Check permissions
+        resender_membership = OrganizationMember.objects.get_membership(
+            invitation.organization, resent_by
+        )
+
+        can_resend = (
+            (resender_membership and resender_membership.can_manage_members) or
+            invitation.invited_by == resent_by
+        )
+
+        if not can_resend:
+            raise PermissionDeniedException(
+                "You don't have permission to resend this invitation."
+            )
+
+        if not invitation.can_resend:
+            raise ServiceException("This invitation cannot be resent at this time.")
+
+        # Generate new token for security
+        from apps.core.utils import generate_random_token, generate_secure_hash
+        
+        new_token = generate_random_token(32)
+        invitation.token = new_token
+        invitation.token_hash = generate_secure_hash(new_token)
+        invitation.resend()
+
+        # Send email
+        from .tasks import send_invitation_email
+        send_invitation_email.delay(str(invitation.id), new_token)
+
+        logger.info(f"Invitation resent: {invitation.email}", extra={
+            'invitation_id': str(invitation.id),
+            'resent_by': str(resent_by.id),
+        })
+
+        return new_token
+
+    @staticmethod
+    def get_user_pending_invitations(user: User) -> List[Invitation]:
+        """
+        Get all pending invitations for a user's email.
+        """
+        return Invitation.objects.filter(
+            email=user.email.lower(),
+            status='pending'
+        ).select_related('organization', 'invited_by')
+
+    @staticmethod
+    def cleanup_expired_invitations() -> int:
+        """
+        Mark expired invitations as expired.
+        Returns: Number of invitations marked as expired.
+        """
+        count = Invitation.objects.cleanup_expired()
+        
+        logger.info(f"Marked {count} invitations as expired")
+        
+        return count
+```
+
+---
+
+## Invitations Tasks
+
+### `apps/invitations/tasks.py`
+
+```python
+"""
+Celery tasks for invitations.
+"""
+import logging
+from celery import shared_task
+from django.core.mail import send_mail
+from django.conf import settings
+from django.template.loader import render_to_string
+from django.utils import timezone
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_invitation_email(self, invitation_id: str, token: str):
+    """
+    Send invitation email.
+    """
+    try:
+        from .models import Invitation
+
+        invitation = Invitation.objects.select_related(
+            'organization', 'invited_by'
+        ).get(id=invitation_id)
+
+        invitation_url = f"https://{settings.DOMAIN}/invitations/{token}/accept"
+
+        subject = f"Invitation to join {invitation.organization.name}"
+        html_message = render_to_string('emails/invitation.html', {
+            'invitation': invitation,
+            'invitation_url': invitation_url,
+            'organization': invitation.organization,
+            'invited_by': invitation.invited_by,
+        })
+        plain_message = f"""
+Hi,
+
+{invitation.invited_by.display_name if invitation.invited_by else 'Someone'} has invited you to join {invitation.organization.name}.
+
+{invitation.message if invitation.message else ''}
+
+Click the link below to accept the invitation:
+{invitation_url}
+
+This invitation will expire on {invitation.expires_at.strftime('%B %d, %Y at %I:%M %p')}.
+
+If you don't want to accept this invitation, you can safely ignore this email.
+
+Best,
+The Team
+        """
+
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[invitation.email],
+            html_message=html_message,
+            fail_silently=False,
+        )
+
+        logger.info(f"Invitation email sent to: {invitation.email}")
+
+    except Exception as exc:
+        logger.error(f"Failed to send invitation email: {exc}")
+        raise self.retry(exc=exc)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_invitation_accepted_notification(self, invitation_id: str, user_id: str):
+    """
+    Notify inviter that invitation was accepted.
+    """
+    try:
+        from .models import Invitation
+        from apps.authentication.models import User
+
+        invitation = Invitation.objects.select_related(
+            'organization', 'invited_by'
+        ).get(id=invitation_id)
+        user = User.objects.get(id=user_id)
+
+        if not invitation.invited_by:
+            return
+
+        subject = f"{user.display_name} accepted your invitation"
+        plain_message = f"""
+Hi {invitation.invited_by.display_name},
+
+{user.display_name} ({user.email}) has accepted your invitation to join {invitation.organization.name}.
+
+Best,
+The Team
+        """
+
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[invitation.invited_by.email],
+            fail_silently=False,
+        )
+
+        logger.info(f"Acceptance notification sent to: {invitation.invited_by.email}")
+
+    except Exception as exc:
+        logger.error(f"Failed to send acceptance notification: {exc}")
+        raise self.retry(exc=exc)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_invitation_declined_notification(self, invitation_id: str, reason: str = ''):
+    """
+    Notify inviter that invitation was declined.
+    """
+    try:
+        from .models import Invitation
+
+        invitation = Invitation.objects.select_related(
+            'organization', 'invited_by'
+        ).get(id=invitation_id)
+
+        if not invitation.invited_by:
+            return
+
+        subject = f"Invitation to {invitation.email} was declined"
+        plain_message = f"""
+Hi {invitation.invited_by.display_name},
+
+The invitation you sent to {invitation.email} for {invitation.organization.name} was declined.
+
+{f'Reason: {reason}' if reason else ''}
+
+Best,
+The Team
+        """
+
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[invitation.invited_by.email],
+            fail_silently=False,
+        )
+
+        logger.info(f"Decline notification sent to: {invitation.invited_by.email}")
+
+    except Exception as exc:
+        logger.error(f"Failed to send decline notification: {exc}")
+        raise self.retry(exc=exc)
+
+
+@shared_task
+def cleanup_expired_invitations():
+    """
+    Cleanup expired invitations.
+    Runs daily via celery beat.
+    """
+    from .services import InvitationService
+    
+    count = InvitationService.cleanup_expired_invitations()
+    
+    logger.info(f"Cleaned up {count} expired invitations")
+    
+    return count
+
+
+@shared_task
+def cleanup_old_invitations():
+    """
+    Delete old invitations (accepted/declined/cancelled).
+    Keep them for 90 days for audit purposes.
+    """
+    from .models import Invitation
+    from datetime import timedelta
+    
+    cutoff = timezone.now() - timedelta(days=90)
+    
+    old_invitations = Invitation.objects.filter(
+        status__in=['accepted', 'declined', 'cancelled'],
+        updated_at__lt=cutoff
+    )
+    
+    count = old_invitations.count()
+    old_invitations.delete()
+    
+    logger.info(f"Deleted {count} old invitations")
+    
+    return count
+```
+
+---
+
+## Invitations Views
+
+### `apps/invitations/views.py`
+
+```python
+"""
+Invitation views.
+"""
+import logging
+from rest_framework import status, generics, views
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from drf_spectacular.utils import extend_schema, OpenApiResponse
+from django.shortcuts import get_object_or_404
+
+from apps.core.permissions import IsOrganizationMember
+from apps.organizations.models import Organization
+from .models import Invitation
+from .serializers import (
+    InvitationSerializer,
+    InvitationCreateSerializer,
+    InvitationBulkCreateSerializer,
+    InvitationPublicSerializer,
+    InvitationAcceptSerializer,
+    InvitationDeclineSerializer,
+)
+from .services import InvitationService
+
+logger = logging.getLogger(__name__)
+
+
+class OrganizationInvitationMixin:
+    """
+    Mixin to get organization from URL.
+    """
+    def get_organization(self):
+        org_id = self.kwargs.get('org_id')
+        return get_object_or_404(Organization, id=org_id)
+
+
+@extend_schema(tags=['Invitations'])
+class InvitationListView(OrganizationInvitationMixin, generics.ListAPIView):
+    """
+    List organization invitations.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = InvitationSerializer
+
+    @extend_schema(
+        summary="List organization invitations",
+        responses={200: InvitationSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        status_filter = self.request.query_params.get('status', 'pending')
+
+        queryset = Invitation.objects.filter(
+            organization=organization
+        ).select_related('invited_by')
+
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+
+        return queryset.order_by('-created_at')
+
+
+@extend_schema(tags=['Invitations'])
+class InvitationCreateView(OrganizationInvitationMixin, views.APIView):
+    """
+    Create an invitation.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Create invitation",
+        request=InvitationCreateSerializer,
+        responses={
+            201: InvitationSerializer,
+            400: OpenApiResponse(description="Validation error"),
+        }
+    )
+    def post(self, request, org_id):
+        organization = self.get_organization()
+
+        serializer = InvitationCreateSerializer(
+            data=request.data,
+            context={'organization': organization, 'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+
+        invitation, token = InvitationService.create_invitation(
+            organization=organization,
+            email=serializer.validated_data['email'],
+            invited_by=request.user,
+            role=serializer.validated_data.get('role', 'member'),
+            custom_role=serializer.validated_data.get('custom_role_id'),
+            teams=serializer.validated_data.get('team_ids', []),
+            message=serializer.validated_data.get('message', '')
+        )
+
+        return Response({
+            'data': InvitationSerializer(invitation).data,
+            'message': 'Invitation sent successfully.'
+        }, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(tags=['Invitations'])
+class InvitationBulkCreateView(OrganizationInvitationMixin, views.APIView):
+    """
+    Bulk create invitations.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Bulk create invitations",
+        request=InvitationBulkCreateSerializer,
+        responses={
+            200: OpenApiResponse(description="Bulk invitation results"),
+        }
+    )
+    def post(self, request, org_id):
+        organization = self.get_organization()
+
+        serializer = InvitationBulkCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        results = InvitationService.bulk_create_invitations(
+            organization=organization,
+            emails=serializer.validated_data['emails'],
+            invited_by=request.user,
+            role=serializer.validated_data.get('role', 'member'),
+            custom_role=serializer.validated_data.get('custom_role_id'),
+            teams=serializer.validated_data.get('team_ids', []),
+            message=serializer.validated_data.get('message', '')
+        )
+
+        return Response({
+            'data': results,
+            'message': f"Sent {len(results['successful'])} invitations, {len(results['failed'])} failed."
+        })
+
+
+@extend_schema(tags=['Invitations'])
+class InvitationDetailView(OrganizationInvitationMixin, generics.RetrieveAPIView):
+    """
+    Get invitation details.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = InvitationSerializer
+    lookup_url_kwarg = 'invitation_id'
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return Invitation.objects.filter(
+            organization=organization
+        ).select_related('invited_by')
+
+
+@extend_schema(tags=['Invitations'])
+class InvitationCancelView(OrganizationInvitationMixin, views.APIView):
+    """
+    Cancel an invitation.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Cancel invitation",
+        responses={
+            200: OpenApiResponse(description="Invitation cancelled"),
+            403: OpenApiResponse(description="Permission denied"),
+        }
+    )
+    def post(self, request, org_id, invitation_id):
+        organization = self.get_organization()
+        invitation = get_object_or_404(
+            Invitation,
+            id=invitation_id,
+            organization=organization
+        )
+
+        InvitationService.cancel_invitation(
+            invitation=invitation,
+            cancelled_by=request.user
+        )
+
+        return Response({
+            'message': 'Invitation cancelled successfully.'
+        })
+
+
+@extend_schema(tags=['Invitations'])
+class InvitationResendView(OrganizationInvitationMixin, views.APIView):
+    """
+    Resend an invitation.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Resend invitation",
+        responses={
+            200: OpenApiResponse(description="Invitation resent"),
+            400: OpenApiResponse(description="Cannot resend"),
+        }
+    )
+    def post(self, request, org_id, invitation_id):
+        organization = self.get_organization()
+        invitation = get_object_or_404(
+            Invitation,
+            id=invitation_id,
+            organization=organization
+        )
+
+        InvitationService.resend_invitation(
+            invitation=invitation,
+            resent_by=request.user
+        )
+
+        return Response({
+            'message': 'Invitation resent successfully.'
+        })
+
+
+# Public invitation endpoints (no org context)
+
+@extend_schema(tags=['Invitations - Public'])
+class InvitationByTokenView(views.APIView):
+    """
+    Get invitation details by token (public).
+    """
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Get invitation by token",
+        responses={
+            200: InvitationPublicSerializer,
+            404: OpenApiResponse(description="Invitation not found"),
+        }
+    )
+    def get(self, request, token):
+        invitation = Invitation.objects.get_by_token(token)
+
+        if not invitation:
+            return Response({
+                'error': 'Invitation not found or has expired.'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        if not invitation.is_valid:
+            return Response({
+                'error': 'This invitation is no longer valid.',
+                'status': invitation.status,
+                'is_expired': invitation.is_expired
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'data': InvitationPublicSerializer(invitation).data
+        })
+
+
+@extend_schema(tags=['Invitations - Public'])
+class InvitationAcceptView(views.APIView):
+    """
+    Accept an invitation (requires authentication).
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Accept invitation",
+        request=InvitationAcceptSerializer,
+        responses={
+            200: OpenApiResponse(description="Invitation accepted"),
+            400: OpenApiResponse(description="Invalid invitation"),
+        }
+    )
+    def post(self, request, token):
+        invitation = Invitation.objects.get_by_token(token)
+
+        if not invitation:
+            return Response({
+                'error': 'Invitation not found or has expired.'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        member = InvitationService.accept_invitation(
+            invitation=invitation,
+            user=request.user
+        )
+
+        from apps.organizations.serializers import OrganizationMemberSerializer
+
+        return Response({
+            'data': OrganizationMemberSerializer(member).data,
+            'message': f'Welcome to {invitation.organization.name}!'
+        })
+
+
+@extend_schema(tags=['Invitations - Public'])
+class InvitationDeclineView(views.APIView):
+    """
+    Decline an invitation (can be anonymous).
+    """
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Decline invitation",
+        request=InvitationDeclineSerializer,
+        responses={
+            200: OpenApiResponse(description="Invitation declined"),
+        }
+    )
+    def post(self, request, token):
+        invitation = Invitation.objects.get_by_token(token)
+
+        if not invitation:
+            return Response({
+                'error': 'Invitation not found or has expired.'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        reason = request.data.get('reason', '')
+
+        InvitationService.decline_invitation(
+            invitation=invitation,
+            reason=reason
+        )
+
+        return Response({
+            'message': 'Invitation declined.'
+        })
+
+
+@extend_schema(tags=['Invitations - Public'])
+class UserPendingInvitationsView(generics.ListAPIView):
+    """
+    List pending invitations for current user.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = InvitationPublicSerializer
+
+    @extend_schema(
+        summary="List user's pending invitations",
+        responses={200: InvitationPublicSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        return InvitationService.get_user_pending_invitations(self.request.user)
+```
+
+## Invitations URLs
+
+### `apps/invitations/urls.py`
+
+```python
+"""
+Invitation URL patterns.
+"""
+from django.urls import path
+from .views import (
+    InvitationListView,
+    InvitationCreateView,
+    InvitationBulkCreateView,
+    InvitationDetailView,
+    InvitationCancelView,
+    InvitationResendView,
+    InvitationByTokenView,
+    InvitationAcceptView,
+    InvitationDeclineView,
+    UserPendingInvitationsView,
+)
+
+app_name = 'invitations'
+
+urlpatterns = [
+    # Organization invitations (requires org context)
+    path(
+        'organizations/<uuid:org_id>/invitations/',
+        InvitationListView.as_view(),
+        name='list'
+    ),
+    path(
+        'organizations/<uuid:org_id>/invitations/create/',
+        InvitationCreateView.as_view(),
+        name='create'
+    ),
+    path(
+        'organizations/<uuid:org_id>/invitations/bulk-create/',
+        InvitationBulkCreateView.as_view(),
+        name='bulk-create'
+    ),
+    path(
+        'organizations/<uuid:org_id>/invitations/<uuid:invitation_id>/',
+        InvitationDetailView.as_view(),
+        name='detail'
+    ),
+    path(
+        'organizations/<uuid:org_id>/invitations/<uuid:invitation_id>/cancel/',
+        InvitationCancelView.as_view(),
+        name='cancel'
+    ),
+    path(
+        'organizations/<uuid:org_id>/invitations/<uuid:invitation_id>/resend/',
+        InvitationResendView.as_view(),
+        name='resend'
+    ),
+
+    # Public invitation endpoints (no org context)
+    path(
+        'invitations/pending/',
+        UserPendingInvitationsView.as_view(),
+        name='user-pending'
+    ),
+    path(
+        'invitations/<str:token>/',
+        InvitationByTokenView.as_view(),
+        name='by-token'
+    ),
+    path(
+        'invitations/<str:token>/accept/',
+        InvitationAcceptView.as_view(),
+        name='accept'
+    ),
+    path(
+        'invitations/<str:token>/decline/',
+        InvitationDeclineView.as_view(),
+        name='decline'
+    ),
+]
+```
+
+---
+
+## Invitations Signals
+
+### `apps/invitations/signals.py`
+
+```python
+"""
+Invitation signals.
+"""
+import logging
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from .models import Invitation
+
+logger = logging.getLogger(__name__)
+
+
+@receiver(post_save, sender=Invitation)
+def invitation_saved(sender, instance, created, **kwargs):
+    """
+    Handle invitation creation/update.
+    """
+    if created:
+        logger.info(f"Invitation created: {instance.email}", extra={
+            'invitation_id': str(instance.id),
+            'organization_id': str(instance.organization_id),
+            'invited_by': str(instance.invited_by_id) if instance.invited_by else None,
+        })
+    else:
+        if instance.status == 'accepted':
+            logger.info(f"Invitation accepted: {instance.email}", extra={
+                'invitation_id': str(instance.id),
+                'organization_id': str(instance.organization_id),
+            })
+        elif instance.status == 'declined':
+            logger.info(f"Invitation declined: {instance.email}", extra={
+                'invitation_id': str(instance.id),
+            })
+```
+
+---
+
+## Invitations Admin
+
+### `apps/invitations/admin.py`
+
+```python
+"""
+Admin configuration for invitation models.
+"""
+from django.contrib import admin
+from django.utils.html import format_html
+from django.utils import timezone
+from .models import Invitation
+
+
+@admin.register(Invitation)
+class InvitationAdmin(admin.ModelAdmin):
+    """
+    Admin for Invitation model.
+    """
+    list_display = [
+        'email',
+        'organization',
+        'role',
+        'status_badge',
+        'invited_by',
+        'expires_at',
+        'created_at',
+    ]
+    list_filter = [
+        'status',
+        'role',
+        'organization',
+        'created_at',
+    ]
+    search_fields = [
+        'email',
+        'organization__name',
+        'invited_by__email',
+    ]
+    readonly_fields = [
+        'id',
+        'token',
+        'token_hash',
+        'sent_at',
+        'accepted_at',
+        'declined_at',
+        'cancelled_at',
+        'resent_count',
+        'last_resent_at',
+        'created_at',
+        'updated_at',
+    ]
+    raw_id_fields = ['organization', 'invited_by', 'custom_role']
+    filter_horizontal = ['teams']
+    ordering = ['-created_at']
+
+    fieldsets = (
+        (None, {
+            'fields': ('id', 'organization', 'email', 'status')
+        }),
+        ('Role & Teams', {
+            'fields': ('role', 'custom_role', 'teams')
+        }),
+        ('Invitation Details', {
+            'fields': ('invited_by', 'message', 'expires_at')
+        }),
+        ('Token', {
+            'fields': ('token', 'token_hash'),
+            'classes': ('collapse',)
+        }),
+        ('Tracking', {
+            'fields': (
+                'sent_at', 'accepted_at', 'declined_at', 'cancelled_at',
+                'resent_count', 'last_resent_at'
+            ),
+            'classes': ('collapse',)
+        }),
+        ('Metadata', {
+            'fields': ('metadata', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def status_badge(self, obj):
+        """Display status with colored badge."""
+        colors = {
+            'pending': '#FFA500',
+            'accepted': '#28A745',
+            'declined': '#DC3545',
+            'cancelled': '#6C757D',
+            'expired': '#6C757D',
+        }
+        color = colors.get(obj.status, '#6C757D')
+        return format_html(
+            '<span style="background-color: {}; color: white; padding: 3px 8px; '
+            'border-radius: 3px; font-size: 11px;">{}</span>',
+            color,
+            obj.status.upper()
+        )
+    status_badge.short_description = 'Status'
+
+    actions = ['cancel_invitations', 'resend_invitations']
+
+    @admin.action(description='Cancel selected invitations')
+    def cancel_invitations(self, request, queryset):
+        pending = queryset.filter(status='pending')
+        count = pending.update(
+            status='cancelled',
+            cancelled_at=timezone.now()
+        )
+        self.message_user(request, f"Cancelled {count} invitation(s).")
+
+    @admin.action(description='Resend selected invitations')
+    def resend_invitations(self, request, queryset):
+        from .services import InvitationService
+
+        count = 0
+        for invitation in queryset.filter(status='pending'):
+            if invitation.can_resend:
+                try:
+                    InvitationService.resend_invitation(invitation, request.user)
+                    count += 1
+                except Exception:
+                    pass
+
+        self.message_user(request, f"Resent {count} invitation(s).")
+```
+
+---
+
+## Invitation Email Template
+
+### `templates/emails/invitation.html`
+
+```html
+{% extends "emails/base_email.html" %} {% block title %}You're Invited!{%
+endblock %} {% block content %}
+<h2>You're Invited!</h2>
+
+<p>
+  {% if invited_by %}
+  <strong>{{ invited_by.display_name }}</strong> has invited you to join {% else
+  %} You've been invited to join {% endif %}
+  <strong>{{ organization.name }}</strong>.
+</p>
+
+{% if invitation.message %}
+<div
+  style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;"
+>
+  <p style="margin: 0; font-style: italic;">"{{ invitation.message }}"</p>
+</div>
+{% endif %}
+
+<table style="border-collapse: collapse; margin: 20px 0; width: 100%;">
+  <tr>
+    <td
+      style="padding: 10px; border: 1px solid #ddd; background-color: #f8f9fa;"
+    >
+      <strong>Organization</strong>
+    </td>
+    <td style="padding: 10px; border: 1px solid #ddd;">
+      {{ organization.name }}
+    </td>
+  </tr>
+  <tr>
+    <td
+      style="padding: 10px; border: 1px solid #ddd; background-color: #f8f9fa;"
+    >
+      <strong>Your Role</strong>
+    </td>
+    <td style="padding: 10px; border: 1px solid #ddd;">
+      {% if invitation.custom_role %} {{ invitation.custom_role.name }} {% else
+      %} {{ invitation.role|title }} {% endif %}
+    </td>
+  </tr>
+  <tr>
+    <td
+      style="padding: 10px; border: 1px solid #ddd; background-color: #f8f9fa;"
+    >
+      <strong>Expires</strong>
+    </td>
+    <td style="padding: 10px; border: 1px solid #ddd;">
+      {{ invitation.expires_at|date:"F d, Y" }} at {{
+      invitation.expires_at|time:"g:i A" }}
+    </td>
+  </tr>
+</table>
+
+<p style="text-align: center; margin: 30px 0;">
+  <a href="{{ invitation_url }}" class="button"> Accept Invitation </a>
+</p>
+
+<p style="text-align: center; color: #666; font-size: 14px;">
+  Or copy and paste this link into your browser:<br />
+  <span style="word-break: break-all;">{{ invitation_url }}</span>
+</p>
+
+<hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;" />
+
+<p style="color: #666; font-size: 14px;">
+  If you don't want to join {{ organization.name }}, you can safely ignore this
+  email. The invitation will expire automatically.
+</p>
+{% endblock %}
+```
+

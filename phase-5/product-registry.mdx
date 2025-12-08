@@ -1,0 +1,1246 @@
+---
+title: 'Products Registry'
+description: 'Continuing with the **Products Registry Framework**'
+sidebarTitle: 'Products Registry'
+---
+
+## Products Registry System
+
+### `apps/products/apps.py`
+
+```python
+from django.apps import AppConfig
+
+
+class ProductsConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.products'
+    verbose_name = 'Products'
+
+    def ready(self):
+        """Import signals and discover products."""
+        import apps.products.signals  # noqa
+        from .registry import ProductRegistry
+        
+        # Auto-discover products
+        ProductRegistry.autodiscover()
+```
+
+### `apps/products/models.py`
+
+```python
+"""
+Product models for the plugin system.
+"""
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+from apps.core.models import BaseModel
+from apps.core.mixins import StatusMixin, MetadataMixin
+from apps.organizations.models import Organization
+from apps.authentication.models import User
+
+
+class Product(BaseModel, StatusMixin, MetadataMixin):
+    """
+    Product model representing available products/plugins.
+    """
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('beta', 'Beta'),
+        ('deprecated', 'Deprecated'),
+        ('maintenance', 'Maintenance'),
+    ]
+
+    # Product identification
+    slug = models.SlugField(
+        max_length=100,
+        unique=True,
+        db_index=True,
+        help_text=_('Unique product identifier')
+    )
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    
+    # Version
+    version = models.CharField(max_length=50, default='1.0.0')
+    
+    # Plugin information
+    plugin_module = models.CharField(
+        max_length=255,
+        help_text=_('Python module path for the plugin')
+    )
+    plugin_class = models.CharField(
+        max_length=255,
+        help_text=_('Plugin class name')
+    )
+    
+    # Features
+    requires_separate_billing = models.BooleanField(
+        default=False,
+        help_text=_('Product has its own billing')
+    )
+    has_custom_roles = models.BooleanField(
+        default=False,
+        help_text=_('Product defines custom roles')
+    )
+    has_custom_settings = models.BooleanField(
+        default=False,
+        help_text=_('Product has custom settings')
+    )
+    
+    # Configuration
+    config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Product configuration')
+    )
+    default_settings = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Default settings for new installations')
+    )
+    
+    # Appearance
+    icon = models.CharField(max_length=50, blank=True)
+    color = models.CharField(max_length=7, default='#3B82F6')
+    banner_url = models.URLField(max_length=500, blank=True)
+    
+    # Availability
+    is_public = models.BooleanField(
+        default=True,
+        help_text=_('Publicly available for all organizations')
+    )
+    is_free = models.BooleanField(default=False)
+    
+    # Ordering
+    sort_order = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = 'products'
+        verbose_name = _('product')
+        verbose_name_plural = _('products')
+        ordering = ['sort_order', 'name']
+        indexes = [
+            models.Index(fields=['slug']),
+            models.Index(fields=['status']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+    def get_plugin_instance(self):
+        """Get instance of the plugin class."""
+        from .registry import ProductRegistry
+        return ProductRegistry.get_product(self.slug)
+
+
+class OrganizationProduct(BaseModel, StatusMixin):
+    """
+    Relationship between Organization and Product.
+    Tracks which products an organization has enabled.
+    """
+    STATUS_CHOICES = [
+        ('trial', 'Trial'),
+        ('active', 'Active'),
+        ('suspended', 'Suspended'),
+        ('cancelled', 'Cancelled'),
+    ]
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='organization_products'
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='organization_installations'
+    )
+    
+    # Status
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='active',
+        db_index=True
+    )
+    
+    # Tracking
+    enabled_at = models.DateTimeField(auto_now_add=True)
+    enabled_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='products_enabled'
+    )
+    disabled_at = models.DateTimeField(null=True, blank=True)
+    
+    # Trial
+    trial_ends_at = models.DateTimeField(null=True, blank=True)
+    
+    # Product-specific settings
+    settings = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Organization-specific product settings')
+    )
+    
+    # Usage tracking
+    usage_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Product usage metrics')
+    )
+
+    class Meta:
+        db_table = 'organization_products'
+        verbose_name = _('organization product')
+        verbose_name_plural = _('organization products')
+        unique_together = [['organization', 'product']]
+        indexes = [
+            models.Index(fields=['organization', 'status']),
+            models.Index(fields=['product', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.name} - {self.product.name}"
+
+    @property
+    def is_trial(self):
+        """Check if in trial period."""
+        from django.utils import timezone
+        return (
+            self.status == 'trial' and
+            self.trial_ends_at and
+            self.trial_ends_at > timezone.now()
+        )
+
+
+class ProductMember(BaseModel, StatusMixin):
+    """
+    Product-specific membership (subset of org members).
+    """
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('suspended', 'Suspended'),
+    ]
+
+    organization_product = models.ForeignKey(
+        OrganizationProduct,
+        on_delete=models.CASCADE,
+        related_name='members'
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='product_memberships'
+    )
+    
+    # Access level
+    access_level = models.CharField(
+        max_length=20,
+        default='full',
+        choices=[
+            ('full', 'Full Access'),
+            ('limited', 'Limited Access'),
+            ('readonly', 'Read Only'),
+        ]
+    )
+    
+    # Status
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='active'
+    )
+    
+    # Tracking
+    added_at = models.DateTimeField(auto_now_add=True)
+    added_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='product_members_added'
+    )
+    
+    # Product-specific metadata
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'product_members'
+        verbose_name = _('product member')
+        verbose_name_plural = _('product members')
+        unique_together = [['organization_product', 'user']]
+        indexes = [
+            models.Index(fields=['user', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.organization_product.product.name}"
+
+
+class ProductBilling(BaseModel):
+    """
+    Separate billing configuration for products.
+    """
+    organization_product = models.OneToOneField(
+        OrganizationProduct,
+        on_delete=models.CASCADE,
+        related_name='billing'
+    )
+    
+    # Billing details
+    billing_email = models.EmailField(blank=True)
+    
+    # Subscription
+    subscription_id = models.CharField(max_length=255, blank=True)
+    pricing_plan_id = models.CharField(max_length=100, blank=True)
+    
+    # Payment
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True
+    )
+    currency = models.CharField(max_length=3, default='USD')
+    billing_interval = models.CharField(
+        max_length=20,
+        default='month',
+        choices=[
+            ('month', 'Monthly'),
+            ('year', 'Yearly'),
+        ]
+    )
+    
+    # Status
+    next_billing_date = models.DateField(null=True, blank=True)
+    
+    # Metadata from billing provider
+    provider_data = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'product_billing'
+        verbose_name = _('product billing')
+        verbose_name_plural = _('product billing')
+
+    def __str__(self):
+        return f"Billing for {self.organization_product}"
+```
+
+### `apps/products/base.py`
+
+```python
+"""
+Base product plugin interface.
+"""
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Any
+
+
+class BaseProduct(ABC):
+    """
+    Abstract base class for product plugins.
+    All products must inherit from this class.
+    """
+    
+    # Product metadata (must be defined)
+    slug: str = ''
+    name: str = ''
+    version: str = '1.0.0'
+    description: str = ''
+    
+    # Features
+    requires_separate_billing: bool = False
+    has_custom_roles: bool = False
+    has_custom_settings: bool = False
+    
+    # Default configuration
+    default_settings: Dict[str, Any] = {}
+
+    @abstractmethod
+    def on_install(self, organization_product) -> bool:
+        """
+        Called when product is installed for an organization.
+        
+        Args:
+            organization_product: OrganizationProduct instance
+            
+        Returns:
+            bool: True if installation successful
+        """
+        pass
+
+    @abstractmethod
+    def on_uninstall(self, organization_product) -> bool:
+        """
+        Called when product is uninstalled.
+        
+        Args:
+            organization_product: OrganizationProduct instance
+            
+        Returns:
+            bool: True if uninstall successful
+        """
+        pass
+
+    def on_upgrade(self, organization_product, old_version: str, new_version: str) -> bool:
+        """
+        Called when product is upgraded.
+        """
+        return True
+
+    def register_permissions(self) -> List[Dict]:
+        """
+        Register product-specific permissions.
+        
+        Returns:
+            List of permission definitions
+        """
+        return []
+
+    def register_roles(self) -> List[Dict]:
+        """
+        Register product-specific roles.
+        
+        Returns:
+            List of role definitions
+        """
+        return []
+
+    def get_api_urls(self):
+        """
+        Register product-specific API URLs.
+        
+        Returns:
+            URL patterns for the product
+        """
+        return []
+
+    def get_settings_schema(self) -> Dict:
+        """
+        Get JSON schema for product settings.
+        
+        Returns:
+            JSON schema dict
+        """
+        return {}
+
+    def get_dashboard_widget(self, organization_product) -> Optional[Dict]:
+        """
+        Get dashboard widget configuration.
+        
+        Returns:
+            Widget configuration dict or None
+        """
+        return None
+
+    def get_webhook_events(self) -> List[str]:
+        """
+        Get list of webhook events this product emits.
+        
+        Returns:
+            List of event names
+        """
+        return []
+
+    def validate_settings(self, settings: Dict) -> bool:
+        """
+        Validate product settings.
+        
+        Args:
+            settings: Settings dict to validate
+            
+        Returns:
+            bool: True if valid
+        """
+        return True
+
+
+class SampleProduct(BaseProduct):
+    """
+    Example product implementation.
+    """
+    slug = 'sample'
+    name = 'Sample Product'
+    description = 'A sample product for demonstration'
+    
+    def on_install(self, organization_product) -> bool:
+        """Install sample product."""
+        # Create default data, setup resources, etc.
+        print(f"Installing {self.name} for {organization_product.organization.name}")
+        return True
+
+    def on_uninstall(self, organization_product) -> bool:
+        """Uninstall sample product."""
+        # Cleanup data, resources, etc.
+        print(f"Uninstalling {self.name}")
+        return True
+
+    def register_permissions(self) -> List[Dict]:
+        """Register permissions."""
+        return [
+            {
+                'codename': 'sample.view',
+                'name': 'View Sample',
+                'resource': 'sample',
+                'action': 'view',
+            },
+            {
+                'codename': 'sample.manage',
+                'name': 'Manage Sample',
+                'resource': 'sample',
+                'action': 'manage',
+            }
+        ]
+```
+
+### `apps/products/registry.py`
+
+```python
+"""
+Product registry for managing product plugins.
+"""
+import importlib
+import logging
+from typing import Dict, List, Optional
+from django.conf import settings
+from .base import BaseProduct
+
+logger = logging.getLogger(__name__)
+
+
+class ProductRegistry:
+    """
+    Registry for managing product plugins.
+    """
+    _products: Dict[str, BaseProduct] = {}
+    _discovered: bool = False
+
+    @classmethod
+    def register(cls, product_class: type) -> None:
+        """
+        Register a product plugin.
+        
+        Args:
+            product_class: Product class inheriting from BaseProduct
+        """
+        if not issubclass(product_class, BaseProduct):
+            raise ValueError(f"{product_class} must inherit from BaseProduct")
+
+        instance = product_class()
+        
+        if not instance.slug:
+            raise ValueError(f"{product_class} must define a slug")
+
+        cls._products[instance.slug] = instance
+        logger.info(f"Registered product: {instance.slug}")
+
+    @classmethod
+    def unregister(cls, slug: str) -> None:
+        """Unregister a product."""
+        if slug in cls._products:
+            del cls._products[slug]
+            logger.info(f"Unregistered product: {slug}")
+
+    @classmethod
+    def get_product(cls, slug: str) -> Optional[BaseProduct]:
+        """
+        Get a product instance by slug.
+        
+        Args:
+            slug: Product slug
+            
+        Returns:
+            Product instance or None
+        """
+        return cls._products.get(slug)
+
+    @classmethod
+    def all_products(cls) -> Dict[str, BaseProduct]:
+        """Get all registered products."""
+        return cls._products.copy()
+
+    @classmethod
+    def autodiscover(cls) -> None:
+        """
+        Auto-discover and register products.
+        """
+        if cls._discovered:
+            return
+
+        # Discover from settings
+        product_modules = getattr(settings, 'PRODUCT_MODULES', [])
+        
+        for module_path in product_modules:
+            try:
+                importlib.import_module(module_path)
+                logger.info(f"Loaded product module: {module_path}")
+            except ImportError as e:
+                logger.error(f"Failed to load product module {module_path}: {e}")
+
+        # Also discover from database
+        cls._sync_with_database()
+        
+        cls._discovered = True
+
+    @classmethod
+    def _sync_with_database(cls) -> None:
+        """Sync registry with database products."""
+        try:
+            from .models import Product
+            
+            db_products = Product.objects.filter(status='active')
+            
+            for db_product in db_products:
+                if db_product.slug not in cls._products:
+                    # Try to load plugin
+                    try:
+                        module = importlib.import_module(db_product.plugin_module)
+                        plugin_class = getattr(module, db_product.plugin_class)
+                        cls.register(plugin_class)
+                    except (ImportError, AttributeError) as e:
+                        logger.error(
+                            f"Failed to load plugin for {db_product.slug}: {e}"
+                        )
+        except Exception as e:
+            logger.error(f"Failed to sync with database: {e}")
+
+
+# Decorator for registering products
+def register_product(product_class):
+    """
+    Decorator to register a product.
+    
+    Usage:
+        @register_product
+        class MyProduct(BaseProduct):
+            ...
+    """
+    ProductRegistry.register(product_class)
+    return product_class
+```
+
+### `apps/products/services.py`
+
+```python
+"""
+Product services.
+"""
+import logging
+from typing import Optional
+from django.db import transaction
+from django.utils import timezone
+
+from apps.core.exceptions import ServiceException, PermissionDeniedException
+from apps.authentication.models import User
+from apps.organizations.models import Organization, OrganizationMember
+from apps.rbac.services import PermissionService
+from .models import Product, OrganizationProduct, ProductMember
+from .registry import ProductRegistry
+
+logger = logging.getLogger(__name__)
+
+
+class ProductService:
+    """
+    Service for managing products.
+    """
+
+    @staticmethod
+    def enable_product(
+        organization: Organization,
+        product: Product,
+        enabled_by: User,
+        trial_days: int = 0
+    ) -> OrganizationProduct:
+        """
+        Enable a product for an organization.
+        """
+        # Check permissions
+        if not PermissionService.user_has_permission(
+            enabled_by, 'products.manage', organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to manage products."
+            )
+
+        # Check if already enabled
+        if OrganizationProduct.objects.filter(
+            organization=organization,
+            product=product,
+            status='active'
+        ).exists():
+            raise ServiceException("Product is already enabled.")
+
+        with transaction.atomic():
+            # Create organization product
+            trial_ends_at = None
+            if trial_days > 0:
+                from datetime import timedelta
+                trial_ends_at = timezone.now() + timedelta(days=trial_days)
+
+            org_product = OrganizationProduct.objects.create(
+                organization=organization,
+                product=product,
+                status='trial' if trial_days > 0 else 'active',
+                enabled_by=enabled_by,
+                trial_ends_at=trial_ends_at,
+                settings=product.default_settings.copy(),
+            )
+
+            # Run product installation hook
+            plugin = ProductRegistry.get_product(product.slug)
+            if plugin:
+                try:
+                    success = plugin.on_install(org_product)
+                    if not success:
+                        raise ServiceException(
+                            f"Product installation failed for {product.name}"
+                        )
+                except Exception as e:
+                    logger.error(f"Product installation error: {e}")
+                    raise ServiceException(f"Product installation failed: {str(e)}")
+
+            # Create audit log
+            from apps.audit.services import AuditService
+            AuditService.log(
+                action='product.enabled',
+                actor=enabled_by,
+                organization=organization,
+                resource=org_product,
+                severity='info',
+            )
+
+            logger.info(f"Product enabled: {product.name} for {organization.name}", extra={
+                'product_id': str(product.id),
+                'organization_id': str(organization.id),
+            })
+
+            return org_product
+
+    @staticmethod
+    def disable_product(
+        organization_product: OrganizationProduct,
+        disabled_by: User
+    ) -> None:
+        """
+        Disable a product for an organization.
+        """
+        organization = organization_product.organization
+        
+        # Check permissions
+        if not PermissionService.user_has_permission(
+            disabled_by, 'products.manage', organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to manage products."
+            )
+
+        with transaction.atomic():
+            # Run uninstall hook
+            plugin = ProductRegistry.get_product(organization_product.product.slug)
+            if plugin:
+                try:
+                    plugin.on_uninstall(organization_product)
+                except Exception as e:
+                    logger.error(f"Product uninstall error: {e}")
+
+            # Update status
+            organization_product.status = 'cancelled'
+            organization_product.disabled_at = timezone.now()
+            organization_product.save(update_fields=['status', 'disabled_at'])
+
+            # Remove product members
+            ProductMember.objects.filter(
+                organization_product=organization_product
+            ).delete()
+
+            # Create audit log
+            from apps.audit.services import AuditService
+            AuditService.log(
+                action='product.disabled',
+                actor=disabled_by,
+                organization=organization,
+                resource=organization_product,
+            )
+
+            logger.info(
+                f"Product disabled: {organization_product.product.name}",
+                extra={'organization_product_id': str(organization_product.id)}
+            )
+
+    @staticmethod
+    def update_product_settings(
+        organization_product: OrganizationProduct,
+        settings: dict,
+        updated_by: User
+    ) -> OrganizationProduct:
+        """
+        Update product settings.
+        """
+        # Check permissions
+        if not PermissionService.user_has_permission(
+            updated_by, 'products.settings.update', organization_product.organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to update product settings."
+            )
+
+        # Validate settings
+        plugin = ProductRegistry.get_product(organization_product.product.slug)
+        if plugin:
+            if not plugin.validate_settings(settings):
+                raise ServiceException("Invalid product settings.")
+
+        # Update settings
+        organization_product.settings.update(settings)
+        organization_product.save(update_fields=['settings', 'updated_at'])
+
+        # Create audit log
+        from apps.audit.services import AuditService
+        AuditService.log(
+            action='product.settings.updated',
+            actor=updated_by,
+            organization=organization_product.organization,
+            resource=organization_product,
+            changes={'settings': settings},
+        )
+
+        return organization_product
+
+    @staticmethod
+    def add_product_member(
+        organization_product: OrganizationProduct,
+        user: User,
+        added_by: User,
+        access_level: str = 'full'
+    ) -> ProductMember:
+        """
+        Add a user to a product.
+        """
+        # Check if user is org member
+        if not OrganizationMember.objects.is_member(
+            organization_product.organization, user
+        ):
+            raise ServiceException(
+                "User must be a member of the organization."
+            )
+
+        # Check permissions
+        if not PermissionService.user_has_permission(
+            added_by, 'products.members.add', organization_product.organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to add product members."
+            )
+
+        # Create product member
+        member, created = ProductMember.objects.get_or_create(
+            organization_product=organization_product,
+            user=user,
+            defaults={
+                'access_level': access_level,
+                'added_by': added_by,
+            }
+        )
+
+        if not created:
+            raise ServiceException("User is already a product member.")
+
+        return member
+
+    @staticmethod
+    def remove_product_member(
+        organization_product: OrganizationProduct,
+        user: User,
+        removed_by: User
+    ) -> None:
+        """
+        Remove a user from a product.
+        """
+        # Check permissions
+        if not PermissionService.user_has_permission(
+            removed_by, 'products.members.remove', organization_product.organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to remove product members."
+            )
+
+        ProductMember.objects.filter(
+            organization_product=organization_product,
+            user=user
+        ).delete()
+```
+
+### `apps/products/serializers.py`
+
+```python
+"""
+Product serializers.
+"""
+from rest_framework import serializers
+from .models import Product, OrganizationProduct, ProductMember
+
+
+class ProductSerializer(serializers.ModelSerializer):
+    """Serializer for Product model."""
+    class Meta:
+        model = Product
+        fields = [
+            'id',
+            'slug',
+            'name',
+            'description',
+            'version',
+            'status',
+            'icon',
+            'color',
+            'banner_url',
+            'requires_separate_billing',
+            'has_custom_roles',
+            'has_custom_settings',
+            'is_free',
+            'is_public',
+        ]
+
+
+class OrganizationProductSerializer(serializers.ModelSerializer):
+    """Serializer for OrganizationProduct model."""
+    product = ProductSerializer(read_only=True)
+    is_trial = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = OrganizationProduct
+        fields = [
+            'id',
+            'product',
+            'status',
+            'enabled_at',
+            'trial_ends_at',
+            'is_trial',
+            'settings',
+            'usage_data',
+        ]
+
+
+class ProductMemberSerializer(serializers.ModelSerializer):
+    """Serializer for ProductMember model."""
+    from apps.authentication.serializers import UserSerializer
+    user = UserSerializer(read_only=True)
+
+    class Meta:
+        model = ProductMember
+        fields = [
+            'id',
+            'user',
+            'access_level',
+            'status',
+            'added_at',
+        ]
+
+
+class ProductEnableSerializer(serializers.Serializer):
+    """Serializer for enabling a product."""
+    product_id = serializers.UUIDField()
+    trial_days = serializers.IntegerField(default=0, min_value=0, max_value=365)
+
+
+class ProductSettingsUpdateSerializer(serializers.Serializer):
+    """Serializer for updating product settings."""
+    settings = serializers.JSONField()
+```
+
+### `apps/products/views.py`
+
+```python
+"""
+Product views.
+"""
+from rest_framework import generics, views, status
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiResponse
+from django.shortcuts import get_object_or_404
+
+from apps.core.permissions import IsOrganizationMember
+from apps.organizations.models import Organization
+from .models import Product, OrganizationProduct, ProductMember
+from .serializers import (
+    ProductSerializer,
+    OrganizationProductSerializer,
+    ProductMemberSerializer,
+    ProductEnableSerializer,
+    ProductSettingsUpdateSerializer,
+)
+from .services import ProductService
+
+
+@extend_schema(tags=['Products'])
+class ProductListView(generics.ListAPIView):
+    """List available products."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductSerializer
+
+    def get_queryset(self):
+        return Product.objects.filter(
+            status='active',
+            is_public=True
+        )
+
+
+@extend_schema(tags=['Products'])
+class OrganizationProductListView(generics.ListAPIView):
+    """List products enabled for an organization."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = OrganizationProductSerializer
+
+    def get_queryset(self):
+        org_id = self.kwargs.get('org_id')
+        return OrganizationProduct.objects.filter(
+            organization_id=org_id,
+            status__in=['trial', 'active']
+        ).select_related('product')
+
+
+@extend_schema(tags=['Products'])
+class ProductEnableView(views.APIView):
+    """Enable a product for an organization."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Enable product",
+        request=ProductEnableSerializer,
+        responses={201: OrganizationProductSerializer}
+    )
+    def post(self, request, org_id):
+        organization = get_object_or_404(Organization, id=org_id)
+        
+        serializer = ProductEnableSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        product = get_object_or_404(
+            Product,
+            id=serializer.validated_data['product_id']
+        )
+
+        org_product = ProductService.enable_product(
+            organization=organization,
+            product=product,
+            enabled_by=request.user,
+            trial_days=serializer.validated_data.get('trial_days', 0)
+        )
+
+        return Response({
+            'data': OrganizationProductSerializer(org_product).data,
+            'message': f'{product.name} enabled successfully.'
+        }, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(tags=['Products'])
+class ProductDisableView(views.APIView):
+    """Disable a product."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Disable product",
+        responses={200: OpenApiResponse(description="Product disabled")}
+    )
+    def post(self, request, org_id, product_id):
+        org_product = get_object_or_404(
+            OrganizationProduct,
+            organization_id=org_id,
+            product_id=product_id
+        )
+
+        ProductService.disable_product(
+            organization_product=org_product,
+            disabled_by=request.user
+        )
+
+        return Response({
+            'message': 'Product disabled successfully.'
+        })
+
+
+@extend_schema(tags=['Products'])
+class ProductSettingsView(views.APIView):
+    """Get/Update product settings."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Get product settings",
+        responses={200: OrganizationProductSerializer}
+    )
+    def get(self, request, org_id, product_id):
+        org_product = get_object_or_404(
+            OrganizationProduct,
+            organization_id=org_id,
+            product_id=product_id
+        )
+
+        return Response({
+            'data': {'settings': org_product.settings}
+        })
+
+    @extend_schema(
+        summary="Update product settings",
+        request=ProductSettingsUpdateSerializer,
+        responses={200: OrganizationProductSerializer}
+    )
+    def patch(self, request, org_id, product_id):
+        org_product = get_object_or_404(
+            OrganizationProduct,
+            organization_id=org_id,
+            product_id=product_id
+        )
+
+        serializer = ProductSettingsUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        org_product = ProductService.update_product_settings(
+            organization_product=org_product,
+            settings=serializer.validated_data['settings'],
+            updated_by=request.user
+        )
+
+        return Response({
+            'data': OrganizationProductSerializer(org_product).data,
+            'message': 'Settings updated successfully.'
+        })
+```
+
+### `apps/products/urls.py`
+
+```python
+"""
+Product URL patterns.
+"""
+from django.urls import path
+from .views import (
+    ProductListView,
+    OrganizationProductListView,
+    ProductEnableView,
+    ProductDisableView,
+    ProductSettingsView,
+)
+
+app_name = 'products'
+
+urlpatterns = [
+    # Global product list
+    path(
+        'products/',
+        ProductListView.as_view(),
+        name='list'
+    ),
+    
+    # Organization products
+    path(
+        'organizations/<uuid:org_id>/products/',
+        OrganizationProductListView.as_view(),
+        name='org-list'
+    ),
+    path(
+        'organizations/<uuid:org_id>/products/enable/',
+        ProductEnableView.as_view(),
+        name='enable'
+    ),
+    path(
+        'organizations/<uuid:org_id>/products/<uuid:product_id>/disable/',
+        ProductDisableView.as_view(),
+        name='disable'
+    ),
+    path(
+        'organizations/<uuid:org_id>/products/<uuid:product_id>/settings/',
+        ProductSettingsView.as_view(),
+        name='settings'
+    ),
+]
+```
+
+### `apps/products/admin.py`
+
+```python
+"""
+Admin configuration for products.
+"""
+from django.contrib import admin
+from .models import Product, OrganizationProduct, ProductMember, ProductBilling
+
+
+@admin.register(Product)
+class ProductAdmin(admin.ModelAdmin):
+    """Admin for Product model."""
+    list_display = ['name', 'slug', 'version', 'status', 'is_public', 'sort_order']
+    list_filter = ['status', 'is_public', 'is_free']
+    search_fields = ['name', 'slug', 'description']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    ordering = ['sort_order', 'name']
+
+
+@admin.register(OrganizationProduct)
+class OrganizationProductAdmin(admin.ModelAdmin):
+    """Admin for OrganizationProduct model."""
+    list_display = [
+        'organization',
+        'product',
+        'status',
+        'enabled_at',
+        'trial_ends_at',
+    ]
+    list_filter = ['status', 'product']
+    search_fields = ['organization__name', 'product__name']
+    raw_id_fields = ['organization', 'product', 'enabled_by']
+    readonly_fields = ['id', 'enabled_at', 'created_at', 'updated_at']
+
+
+@admin.register(ProductMember)
+class ProductMemberAdmin(admin.ModelAdmin):
+    """Admin for ProductMember model."""
+    list_display = ['user', 'organization_product', 'access_level', 'status', 'added_at']
+    list_filter = ['access_level', 'status']
+    search_fields = ['user__email']
+    raw_id_fields = ['organization_product', 'user', 'added_by']
+
+
+@admin.register(ProductBilling)
+class ProductBillingAdmin(admin.ModelAdmin):
+    """Admin for ProductBilling model."""
+    list_display = [
+        'organization_product',
+        'amount',
+        'currency',
+        'billing_interval',
+        'next_billing_date',
+    ]
+    raw_id_fields = ['organization_product']
+```
+
+### `apps/products/signals.py`
+
+```python
+"""
+Product signals.
+"""
+import logging
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+from .models import OrganizationProduct
+
+logger = logging.getLogger(__name__)
+
+
+@receiver(post_save, sender=OrganizationProduct)
+def organization_product_saved(sender, instance, created, **kwargs):
+    """Handle organization product creation/update."""
+    if created:
+        logger.info(
+            f"Product enabled: {instance.product.name} for {instance.organization.name}",
+            extra={
+                'organization_product_id': str(instance.id),
+                'organization_id': str(instance.organization_id),
+                'product_id': str(instance.product_id),
+            }
+        )
+```

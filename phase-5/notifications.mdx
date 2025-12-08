@@ -1,0 +1,1350 @@
+---
+title: 'Notifications System'
+description: 'Continuing with notification system'
+---
+
+### `apps/notifications/apps.py`
+
+```python
+from django.apps import AppConfig
+
+
+class NotificationsConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.notifications'
+    verbose_name = 'Notifications'
+
+    def ready(self):
+        import apps.notifications.signals  # noqa
+```
+
+### `apps/notifications/models.py`
+
+```python
+"""
+Notification models.
+"""
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+from apps.core.models import BaseModel
+from apps.organizations.models import Organization
+from apps.authentication.models import User
+from .managers import NotificationManager, NotificationPreferenceManager
+
+
+class NotificationType(BaseModel):
+    """
+    Registry of notification types.
+    """
+    CATEGORY_CHOICES = [
+        ('transactional', 'Transactional'),
+        ('system', 'System'),
+        ('activity', 'Activity'),
+        ('marketing', 'Marketing'),
+    ]
+
+    code = models.CharField(
+        max_length=100,
+        unique=True,
+        db_index=True
+    )
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    category = models.CharField(
+        max_length=20,
+        choices=CATEGORY_CHOICES,
+        default='activity'
+    )
+    
+    # Template information
+    title_template = models.CharField(max_length=255)
+    body_template = models.TextField()
+    email_template = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text=_('Email template name')
+    )
+    
+    # Default channels
+    default_channels = models.JSONField(
+        default=lambda: ['in_app'],
+        help_text=_('Default delivery channels')
+    )
+    
+    # Can be disabled by user
+    user_configurable = models.BooleanField(default=True)
+    
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'notification_types'
+        verbose_name = _('notification type')
+        verbose_name_plural = _('notification types')
+        ordering = ['category', 'code']
+
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
+class Notification(BaseModel):
+    """
+    Notification model for in-app and multi-channel notifications.
+    """
+    CHANNEL_CHOICES = [
+        ('in_app', 'In-App'),
+        ('email', 'Email'),
+        ('push', 'Push'),
+        ('sms', 'SMS'),
+        ('webhook', 'Webhook'),
+    ]
+
+    PRIORITY_CHOICES = [
+        ('low', 'Low'),
+        ('normal', 'Normal'),
+        ('high', 'High'),
+        ('urgent', 'Urgent'),
+    ]
+
+    # Recipient
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='notifications'
+    )
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='notifications'
+    )
+
+    # Notification type
+    notification_type = models.ForeignKey(
+        NotificationType,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='notifications'
+    )
+    type_code = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text=_('Notification type code')
+    )
+
+    # Content
+    title = models.CharField(max_length=255)
+    body = models.TextField()
+    data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Additional structured data')
+    )
+
+    # Links and actions
+    action_url = models.URLField(blank=True)
+    action_label = models.CharField(max_length=50, blank=True)
+
+    # Delivery
+    channels = models.JSONField(
+        default=lambda: ['in_app'],
+        help_text=_('Channels to deliver on')
+    )
+    priority = models.CharField(
+        max_length=10,
+        choices=PRIORITY_CHOICES,
+        default='normal'
+    )
+
+    # Status
+    is_read = models.BooleanField(default=False, db_index=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    is_archived = models.BooleanField(default=False)
+    archived_at = models.DateTimeField(null=True, blank=True)
+
+    # Delivery tracking
+    delivery_status = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Status per channel')
+    )
+    delivered_at = models.DateTimeField(null=True, blank=True)
+
+    # Source
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='notifications_triggered'
+    )
+    
+    # Related resource
+    resource_type = models.CharField(max_length=50, blank=True)
+    resource_id = models.CharField(max_length=100, blank=True)
+
+    objects = NotificationManager()
+
+    class Meta:
+        db_table = 'notifications'
+        verbose_name = _('notification')
+        verbose_name_plural = _('notifications')
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'is_read', 'created_at']),
+            models.Index(fields=['user', 'organization', 'is_read']),
+            models.Index(fields=['type_code', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.type_code}: {self.title} to {self.user.email}"
+
+    def mark_read(self):
+        """Mark notification as read."""
+        from django.utils import timezone
+        
+        if not self.is_read:
+            self.is_read = True
+            self.read_at = timezone.now()
+            self.save(update_fields=['is_read', 'read_at'])
+
+    def mark_unread(self):
+        """Mark notification as unread."""
+        self.is_read = False
+        self.read_at = None
+        self.save(update_fields=['is_read', 'read_at'])
+
+    def archive(self):
+        """Archive notification."""
+        from django.utils import timezone
+        
+        self.is_archived = True
+        self.archived_at = timezone.now()
+        self.save(update_fields=['is_archived', 'archived_at'])
+
+
+class NotificationPreference(BaseModel):
+    """
+    User notification preferences.
+    """
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='notification_preferences'
+    )
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='notification_preferences'
+    )
+    notification_type = models.ForeignKey(
+        NotificationType,
+        on_delete=models.CASCADE,
+        related_name='preferences'
+    )
+    
+    # Channel preferences
+    email_enabled = models.BooleanField(default=True)
+    in_app_enabled = models.BooleanField(default=True)
+    push_enabled = models.BooleanField(default=True)
+    sms_enabled = models.BooleanField(default=False)
+    
+    # Global disable
+    is_muted = models.BooleanField(default=False)
+
+    objects = NotificationPreferenceManager()
+
+    class Meta:
+        db_table = 'notification_preferences'
+        verbose_name = _('notification preference')
+        verbose_name_plural = _('notification preferences')
+        unique_together = [['user', 'organization', 'notification_type']]
+        indexes = [
+            models.Index(fields=['user', 'organization']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.notification_type.code}"
+
+    def get_enabled_channels(self):
+        """Get list of enabled channels."""
+        channels = []
+        if self.in_app_enabled:
+            channels.append('in_app')
+        if self.email_enabled:
+            channels.append('email')
+        if self.push_enabled:
+            channels.append('push')
+        if self.sms_enabled:
+            channels.append('sms')
+        return channels
+
+
+class NotificationBatch(BaseModel):
+    """
+    Batch of notifications for bulk sending.
+    """
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('processing', 'Processing'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+    ]
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='notification_batches'
+    )
+    notification_type = models.ForeignKey(
+        NotificationType,
+        on_delete=models.CASCADE
+    )
+    
+    # Recipients
+    recipient_filter = models.JSONField(
+        default=dict,
+        help_text=_('Filter criteria for recipients')
+    )
+    recipient_count = models.PositiveIntegerField(default=0)
+    
+    # Content
+    title = models.CharField(max_length=255)
+    body = models.TextField()
+    data = models.JSONField(default=dict, blank=True)
+    
+    # Status
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending'
+    )
+    sent_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    
+    # Tracking
+    scheduled_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True
+    )
+
+    class Meta:
+        db_table = 'notification_batches'
+        verbose_name = _('notification batch')
+        verbose_name_plural = _('notification batches')
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Batch: {self.notification_type.code} ({self.status})"
+```
+
+### `apps/notifications/managers.py`
+
+```python
+"""
+Custom managers for Notification models.
+"""
+from django.db import models
+from django.utils import timezone
+
+
+class NotificationQuerySet(models.QuerySet):
+    """Custom QuerySet for Notification model."""
+    
+    def for_user(self, user):
+        return self.filter(user=user)
+
+    def for_organization(self, organization):
+        return self.filter(organization=organization)
+
+    def unread(self):
+        return self.filter(is_read=False)
+
+    def read(self):
+        return self.filter(is_read=True)
+
+    def not_archived(self):
+        return self.filter(is_archived=False)
+
+    def by_type(self, type_code):
+        return self.filter(type_code=type_code)
+
+    def recent(self, days=30):
+        cutoff = timezone.now() - timezone.timedelta(days=days)
+        return self.filter(created_at__gte=cutoff)
+
+
+class NotificationManager(models.Manager):
+    """Custom manager for Notification model."""
+    
+    def get_queryset(self):
+        return NotificationQuerySet(self.model, using=self._db)
+
+    def for_user(self, user):
+        return self.get_queryset().for_user(user)
+
+    def unread(self):
+        return self.get_queryset().unread()
+
+    def unread_count(self, user, organization=None):
+        qs = self.for_user(user).unread().not_archived()
+        if organization:
+            qs = qs.for_organization(organization)
+        return qs.count()
+
+
+class NotificationPreferenceManager(models.Manager):
+    """Custom manager for NotificationPreference model."""
+    
+    def get_user_preference(self, user, notification_type, organization=None):
+        """Get preference for specific notification type."""
+        try:
+            return self.get(
+                user=user,
+                notification_type=notification_type,
+                organization=organization
+            )
+        except self.model.DoesNotExist:
+            return None
+
+    def get_enabled_channels(self, user, notification_type, organization=None):
+        """Get enabled channels for a user and notification type."""
+        pref = self.get_user_preference(user, notification_type, organization)
+        
+        if pref:
+            if pref.is_muted:
+                return []
+            return pref.get_enabled_channels()
+        
+        # Return default channels from notification type
+        return notification_type.default_channels
+```
+
+### `apps/notifications/channels/base.py`
+
+```python
+"""
+Base notification channel.
+"""
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class NotificationChannel(ABC):
+    """
+    Abstract base class for notification channels.
+    """
+    channel_name: str = 'base'
+
+    @abstractmethod
+    def send(
+        self,
+        notification,
+        user,
+        context: Dict[str, Any] = None
+    ) -> bool:
+        """
+        Send notification to user.
+        Returns True if successful.
+        """
+        pass
+
+    @abstractmethod
+    def send_batch(
+        self,
+        notifications: List,
+        context: Dict[str, Any] = None
+    ) -> Dict[str, int]:
+        """
+        Send batch of notifications.
+        Returns dict with success/failure counts.
+        """
+        pass
+
+    def log_success(self, notification, details: str = ''):
+        """Log successful delivery."""
+        logger.info(
+            f"Notification delivered via {self.channel_name}: {notification.id}",
+            extra={'notification_id': str(notification.id), 'details': details}
+        )
+
+    def log_failure(self, notification, error: str):
+        """Log failed delivery."""
+        logger.error(
+            f"Notification failed via {self.channel_name}: {notification.id} - {error}",
+            extra={'notification_id': str(notification.id), 'error': error}
+        )
+```
+
+### `apps/notifications/channels/email.py`
+
+```python
+"""
+Email notification channel.
+"""
+from typing import List, Dict, Any
+from django.core.mail import send_mail, send_mass_mail
+from django.template.loader import render_to_string
+from django.conf import settings
+from .base import NotificationChannel
+
+
+class EmailChannel(NotificationChannel):
+    """
+    Email notification channel.
+    """
+    channel_name = 'email'
+
+    def send(
+        self,
+        notification,
+        user,
+        context: Dict[str, Any] = None
+    ) -> bool:
+        """Send email notification."""
+        try:
+            context = context or {}
+            context.update({
+                'notification': notification,
+                'user': user,
+                'title': notification.title,
+                'body': notification.body,
+                'action_url': notification.action_url,
+                'action_label': notification.action_label,
+            })
+
+            # Determine template
+            template = 'emails/notification.html'
+            if notification.notification_type and notification.notification_type.email_template:
+                template = notification.notification_type.email_template
+
+            html_message = render_to_string(template, context)
+            
+            send_mail(
+                subject=notification.title,
+                message=notification.body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                html_message=html_message,
+                fail_silently=False,
+            )
+
+            self.log_success(notification, f'Sent to {user.email}')
+            return True
+
+        except Exception as e:
+            self.log_failure(notification, str(e))
+            return False
+
+    def send_batch(
+        self,
+        notifications: List,
+        context: Dict[str, Any] = None
+    ) -> Dict[str, int]:
+        """Send batch of email notifications."""
+        results = {'success': 0, 'failed': 0}
+
+        messages = []
+        for notification in notifications:
+            try:
+                messages.append((
+                    notification.title,
+                    notification.body,
+                    settings.DEFAULT_FROM_EMAIL,
+                    [notification.user.email],
+                ))
+            except Exception as e:
+                self.log_failure(notification, str(e))
+                results['failed'] += 1
+
+        if messages:
+            try:
+                sent = send_mass_mail(messages, fail_silently=False)
+                results['success'] = sent
+            except Exception as e:
+                results['failed'] += len(messages)
+
+        return results
+```
+
+### `apps/notifications/channels/in_app.py`
+
+```python
+"""
+In-app notification channel.
+"""
+from typing import List, Dict, Any
+from django.utils import timezone
+from .base import NotificationChannel
+
+
+class InAppChannel(NotificationChannel):
+    """
+    In-app notification channel (stored in database).
+    """
+    channel_name = 'in_app'
+
+    def send(
+        self,
+        notification,
+        user,
+        context: Dict[str, Any] = None
+    ) -> bool:
+        """
+        Mark notification as delivered in-app.
+        The notification is already saved, just update delivery status.
+        """
+        try:
+            # Update delivery status
+            notification.delivery_status['in_app'] = {
+                'delivered': True,
+                'delivered_at': timezone.now().isoformat(),
+            }
+            notification.delivered_at = timezone.now()
+            notification.save(update_fields=['delivery_status', 'delivered_at'])
+
+            self.log_success(notification)
+            return True
+
+        except Exception as e:
+            self.log_failure(notification, str(e))
+            return False
+
+    def send_batch(
+        self,
+        notifications: List,
+        context: Dict[str, Any] = None
+    ) -> Dict[str, int]:
+        """Send batch of in-app notifications."""
+        results = {'success': 0, 'failed': 0}
+
+        for notification in notifications:
+            if self.send(notification, notification.user, context):
+                results['success'] += 1
+            else:
+                results['failed'] += 1
+
+        return results
+```
+
+### `apps/notifications/channels/__init__.py`
+
+```python
+"""
+Notification channels registry.
+"""
+from .base import NotificationChannel
+from .email import EmailChannel
+from .in_app import InAppChannel
+
+
+class ChannelRegistry:
+    """Registry of notification channels."""
+    
+    _channels = {}
+
+    @classmethod
+    def register(cls, channel_class):
+        """Register a channel."""
+        cls._channels[channel_class.channel_name] = channel_class()
+
+    @classmethod
+    def get(cls, channel_name) -> NotificationChannel:
+        """Get a channel by name."""
+        return cls._channels.get(channel_name)
+
+    @classmethod
+    def all(cls):
+        """Get all registered channels."""
+        return cls._channels
+
+
+# Register default channels
+ChannelRegistry.register(EmailChannel)
+ChannelRegistry.register(InAppChannel)
+```
+
+### `apps/notifications/services.py`
+
+```python
+"""
+Notification services.
+"""
+import logging
+from typing import List, Dict, Any, Optional
+from django.db import transaction
+from django.utils import timezone
+
+from apps.authentication.models import User
+from apps.organizations.models import Organization
+from .models import Notification, NotificationType, NotificationPreference
+from .channels import ChannelRegistry
+
+logger = logging.getLogger(__name__)
+
+
+class NotificationService:
+    """Service for creating and sending notifications."""
+
+    @staticmethod
+    def create(
+        user: User,
+        type_code: str,
+        title: str,
+        body: str,
+        organization: Organization = None,
+        actor: User = None,
+        data: Dict = None,
+        action_url: str = '',
+        action_label: str = '',
+        resource_type: str = '',
+        resource_id: str = '',
+        channels: List[str] = None,
+        priority: str = 'normal',
+        send_immediately: bool = True
+    ) -> Notification:
+        """
+        Create and optionally send a notification.
+        """
+        # Get notification type
+        notification_type = None
+        try:
+            notification_type = NotificationType.objects.get(code=type_code)
+        except NotificationType.DoesNotExist:
+            logger.warning(f"Notification type not found: {type_code}")
+
+        # Determine channels based on preferences
+        if channels is None:
+            channels = NotificationService._get_user_channels(
+                user, notification_type, organization
+            )
+
+        # Create notification
+        notification = Notification.objects.create(
+            user=user,
+            organization=organization,
+            notification_type=notification_type,
+            type_code=type_code,
+            title=title,
+            body=body,
+            data=data or {},
+            action_url=action_url,
+            action_label=action_label,
+            resource_type=resource_type,
+            resource_id=str(resource_id) if resource_id else '',
+            actor=actor,
+            channels=channels,
+            priority=priority,
+        )
+
+        if send_immediately:
+            NotificationService.send(notification)
+
+        return notification
+
+    @staticmethod
+    def _get_user_channels(
+        user: User,
+        notification_type: NotificationType,
+        organization: Organization = None
+    ) -> List[str]:
+        """Get channels based on user preferences."""
+        if not notification_type:
+            return ['in_app']
+
+        pref = NotificationPreference.objects.get_user_preference(
+            user, notification_type, organization
+        )
+
+        if pref:
+            if pref.is_muted:
+                return []
+            return pref.get_enabled_channels()
+
+        return notification_type.default_channels
+
+    @staticmethod
+    def send(notification: Notification) -> Dict[str, bool]:
+        """
+        Send notification through all specified channels.
+        """
+        results = {}
+
+        for channel_name in notification.channels:
+            channel = ChannelRegistry.get(channel_name)
+            
+            if not channel:
+                logger.warning(f"Channel not found: {channel_name}")
+                results[channel_name] = False
+                continue
+
+            try:
+                success = channel.send(notification, notification.user)
+                results[channel_name] = success
+
+                # Update delivery status
+                notification.delivery_status[channel_name] = {
+                    'delivered': success,
+                    'attempted_at': timezone.now().isoformat(),
+                }
+
+            except Exception as e:
+                logger.error(f"Channel {channel_name} failed: {e}")
+                results[channel_name] = False
+                notification.delivery_status[channel_name] = {
+                    'delivered': False,
+                    'error': str(e),
+                    'attempted_at': timezone.now().isoformat(),
+                }
+
+        notification.save(update_fields=['delivery_status'])
+
+        return results
+
+    @staticmethod
+    def bulk_create(
+        users: List[User],
+        type_code: str,
+        title: str,
+        body: str,
+        organization: Organization = None,
+        **kwargs
+    ) -> List[Notification]:
+        """Create notifications for multiple users."""
+        notifications = []
+
+        for user in users:
+            notification = NotificationService.create(
+                user=user,
+                type_code=type_code,
+                title=title,
+                body=body,
+                organization=organization,
+                send_immediately=False,  # Batch send later
+                **kwargs
+            )
+            notifications.append(notification)
+
+        # Batch send
+        from .tasks import send_notifications_batch
+        notification_ids = [str(n.id) for n in notifications]
+        send_notifications_batch.delay(notification_ids)
+
+        return notifications
+
+    @staticmethod
+    def mark_read(notification_ids: List[str], user: User) -> int:
+        """Mark notifications as read."""
+        return Notification.objects.filter(
+            id__in=notification_ids,
+            user=user,
+            is_read=False
+        ).update(is_read=True, read_at=timezone.now())
+
+    @staticmethod
+    def mark_all_read(user: User, organization: Organization = None) -> int:
+        """Mark all notifications as read for a user."""
+        queryset = Notification.objects.filter(
+            user=user,
+            is_read=False
+        )
+        
+        if organization:
+            queryset = queryset.filter(organization=organization)
+
+        return queryset.update(is_read=True, read_at=timezone.now())
+
+    @staticmethod
+    def get_unread_count(user: User, organization: Organization = None) -> int:
+        """Get unread notification count."""
+        return Notification.objects.unread_count(user, organization)
+
+    @staticmethod
+    def update_preferences(
+        user: User,
+        type_code: str,
+        organization: Organization = None,
+        **channels
+    ) -> NotificationPreference:
+        """Update notification preferences."""
+        notification_type = NotificationType.objects.get(code=type_code)
+
+        pref, created = NotificationPreference.objects.update_or_create(
+            user=user,
+            notification_type=notification_type,
+            organization=organization,
+            defaults=channels
+        )
+
+        return pref
+```
+
+### `apps/notifications/serializers.py`
+
+```python
+"""
+Notification serializers.
+"""
+from rest_framework import serializers
+from apps.authentication.serializers import UserSerializer
+from .models import Notification, NotificationType, NotificationPreference
+
+
+class NotificationTypeSerializer(serializers.ModelSerializer):
+    """Serializer for NotificationType model."""
+    class Meta:
+        model = NotificationType
+        fields = [
+            'id',
+            'code',
+            'name',
+            'description',
+            'category',
+            'default_channels',
+            'user_configurable',
+        ]
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    """Serializer for Notification model."""
+    actor = UserSerializer(read_only=True)
+
+    class Meta:
+        model = Notification
+        fields = [
+            'id',
+            'type_code',
+            'title',
+            'body',
+            'data',
+            'action_url',
+            'action_label',
+            'actor',
+            'is_read',
+            'read_at',
+            'is_archived',
+            'priority',
+            'resource_type',
+            'resource_id',
+            'created_at',
+        ]
+
+
+class NotificationListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for listing notifications."""
+    class Meta:
+        model = Notification
+        fields = [
+            'id',
+            'type_code',
+            'title',
+            'body',
+            'action_url',
+            'is_read',
+            'priority',
+            'created_at',
+        ]
+
+
+class NotificationPreferenceSerializer(serializers.ModelSerializer):
+    """Serializer for NotificationPreference model."""
+    notification_type = NotificationTypeSerializer(read_only=True)
+    notification_type_code = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = NotificationPreference
+        fields = [
+            'id',
+            'notification_type',
+            'notification_type_code',
+            'email_enabled',
+            'in_app_enabled',
+            'push_enabled',
+            'sms_enabled',
+            'is_muted',
+        ]
+
+    def create(self, validated_data):
+        type_code = validated_data.pop('notification_type_code')
+        notification_type = NotificationType.objects.get(code=type_code)
+        validated_data['notification_type'] = notification_type
+        return super().create(validated_data)
+
+
+class MarkReadSerializer(serializers.Serializer):
+    """Serializer for marking notifications as read."""
+    notification_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False
+    )
+    mark_all = serializers.BooleanField(default=False)
+```
+
+### `apps/notifications/views.py`
+
+```python
+"""
+Notification views.
+"""
+from rest_framework import generics, views, status
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiResponse
+from django.shortcuts import get_object_or_404
+
+from apps.organizations.models import Organization
+from .models import Notification, NotificationType, NotificationPreference
+from .serializers import (
+    NotificationSerializer,
+    NotificationListSerializer,
+    NotificationTypeSerializer,
+    NotificationPreferenceSerializer,
+    MarkReadSerializer,
+)
+from .services import NotificationService
+
+
+@extend_schema(tags=['Notifications'])
+class NotificationListView(generics.ListAPIView):
+    """List user notifications."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = NotificationListSerializer
+
+    @extend_schema(
+        summary="List notifications",
+        responses={200: NotificationListSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        queryset = Notification.objects.for_user(
+            self.request.user
+        ).not_archived()
+
+        # Filter by organization if provided
+        org_id = self.request.query_params.get('organization_id')
+        if org_id:
+            queryset = queryset.filter(organization_id=org_id)
+
+        # Filter by read status
+        is_read = self.request.query_params.get('is_read')
+        if is_read is not None:
+            queryset = queryset.filter(is_read=is_read.lower() == 'true')
+
+        return queryset.order_by('-created_at')
+
+
+@extend_schema(tags=['Notifications'])
+class NotificationDetailView(generics.RetrieveAPIView):
+    """Get notification details."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = NotificationSerializer
+
+    def get_queryset(self):
+        return Notification.objects.for_user(self.request.user)
+
+
+@extend_schema(tags=['Notifications'])
+class NotificationMarkReadView(views.APIView):
+    """Mark notifications as read."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Mark notifications as read",
+        request=MarkReadSerializer,
+        responses={200: OpenApiResponse(description="Notifications marked as read")}
+    )
+    def post(self, request):
+        serializer = MarkReadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if serializer.validated_data.get('mark_all'):
+            org_id = request.query_params.get('organization_id')
+            organization = None
+            if org_id:
+                organization = get_object_or_404(Organization, id=org_id)
+
+            count = NotificationService.mark_all_read(
+                user=request.user,
+                organization=organization
+            )
+        else:
+            notification_ids = serializer.validated_data.get('notification_ids', [])
+            count = NotificationService.mark_read(notification_ids, request.user)
+
+        return Response({
+            'message': f'Marked {count} notification(s) as read.',
+            'data': {'count': count}
+        })
+
+
+@extend_schema(tags=['Notifications'])
+class NotificationUnreadCountView(views.APIView):
+    """Get unread notification count."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Get unread count",
+        responses={200: OpenApiResponse(description="Unread count")}
+    )
+    def get(self, request):
+        org_id = request.query_params.get('organization_id')
+        organization = None
+        if org_id:
+            organization = get_object_or_404(Organization, id=org_id)
+
+        count = NotificationService.get_unread_count(
+            user=request.user,
+            organization=organization
+        )
+
+        return Response({
+            'data': {'unread_count': count}
+        })
+
+
+@extend_schema(tags=['Notifications'])
+class NotificationArchiveView(views.APIView):
+    """Archive a notification."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Archive notification",
+        responses={200: OpenApiResponse(description="Notification archived")}
+    )
+    def post(self, request, notification_id):
+        notification = get_object_or_404(
+            Notification,
+            id=notification_id,
+            user=request.user
+        )
+        notification.archive()
+
+        return Response({'message': 'Notification archived.'})
+
+
+@extend_schema(tags=['Notifications'])
+class NotificationDeleteView(views.APIView):
+    """Delete a notification."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Delete notification",
+        responses={200: OpenApiResponse(description="Notification deleted")}
+    )
+    def delete(self, request, notification_id):
+        notification = get_object_or_404(
+            Notification,
+            id=notification_id,
+            user=request.user
+        )
+        notification.delete()
+
+        return Response({'message': 'Notification deleted.'})
+
+
+# Preferences
+
+@extend_schema(tags=['Notification Preferences'])
+class NotificationPreferenceListView(generics.ListAPIView):
+    """List notification preferences."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = NotificationPreferenceSerializer
+
+    def get_queryset(self):
+        return NotificationPreference.objects.filter(
+            user=self.request.user
+        ).select_related('notification_type')
+
+
+@extend_schema(tags=['Notification Preferences'])
+class NotificationPreferenceUpdateView(views.APIView):
+    """Update notification preference."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Update notification preference",
+        request=NotificationPreferenceSerializer,
+        responses={200: NotificationPreferenceSerializer}
+    )
+    def post(self, request):
+        serializer = NotificationPreferenceSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        type_code = serializer.validated_data.pop('notification_type_code')
+        org_id = request.data.get('organization_id')
+        organization = None
+        if org_id:
+            organization = get_object_or_404(Organization, id=org_id)
+
+        pref = NotificationService.update_preferences(
+            user=request.user,
+            type_code=type_code,
+            organization=organization,
+            **serializer.validated_data
+        )
+
+        return Response({
+            'data': NotificationPreferenceSerializer(pref).data,
+            'message': 'Preferences updated.'
+        })
+
+
+@extend_schema(tags=['Notification Preferences'])
+class NotificationTypesView(generics.ListAPIView):
+    """List notification types."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = NotificationTypeSerializer
+
+    def get_queryset(self):
+        return NotificationType.objects.filter(
+            is_active=True,
+            user_configurable=True
+        )
+```
+
+### `apps/notifications/urls.py`
+
+```python
+"""
+Notification URL patterns.
+"""
+from django.urls import path
+from .views import (
+    NotificationListView,
+    NotificationDetailView,
+    NotificationMarkReadView,
+    NotificationUnreadCountView,
+    NotificationArchiveView,
+    NotificationDeleteView,
+    NotificationPreferenceListView,
+    NotificationPreferenceUpdateView,
+    NotificationTypesView,
+)
+
+app_name = 'notifications'
+
+urlpatterns = [
+    # Notifications
+    path(
+        'notifications/',
+        NotificationListView.as_view(),
+        name='list'
+    ),
+    path(
+        'notifications/<uuid:pk>/',
+        NotificationDetailView.as_view(),
+        name='detail'
+    ),
+    path(
+        'notifications/mark-read/',
+        NotificationMarkReadView.as_view(),
+        name='mark-read'
+    ),
+    path(
+        'notifications/unread-count/',
+        NotificationUnreadCountView.as_view(),
+        name='unread-count'
+    ),
+    path(
+        'notifications/<uuid:notification_id>/archive/',
+        NotificationArchiveView.as_view(),
+        name='archive'
+    ),
+    path(
+        'notifications/<uuid:notification_id>/delete/',
+        NotificationDeleteView.as_view(),
+        name='delete'
+    ),
+
+    # Preferences
+    path(
+        'notifications/preferences/',
+        NotificationPreferenceListView.as_view(),
+        name='preferences-list'
+    ),
+    path(
+        'notifications/preferences/update/',
+        NotificationPreferenceUpdateView.as_view(),
+        name='preferences-update'
+    ),
+    path(
+        'notifications/types/',
+        NotificationTypesView.as_view(),
+        name='types'
+    ),
+]
+```
+
+### `apps/notifications/tasks.py`
+
+```python
+"""
+Celery tasks for notifications.
+"""
+import logging
+from celery import shared_task
+from django.utils import timezone
+from datetime import timedelta
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_notification(self, notification_id: str):
+    """Send a single notification."""
+    try:
+        from .models import Notification
+        from .services import NotificationService
+
+        notification = Notification.objects.get(id=notification_id)
+        NotificationService.send(notification)
+
+    except Exception as exc:
+        logger.error(f"Failed to send notification: {exc}")
+        raise self.retry(exc=exc)
+
+
+@shared_task
+def send_notifications_batch(notification_ids: list):
+    """Send a batch of notifications."""
+    from .models import Notification
+    from .services import NotificationService
+
+    notifications = Notification.objects.filter(id__in=notification_ids)
+
+    for notification in notifications:
+        try:
+            NotificationService.send(notification)
+        except Exception as e:
+            logger.error(f"Failed to send notification {notification.id}: {e}")
+
+
+@shared_task
+def cleanup_old_notifications():
+    """Delete old read notifications."""
+    from .models import Notification
+
+    cutoff = timezone.now() - timedelta(days=90)
+
+    # Delete old read and archived notifications
+    deleted, _ = Notification.objects.filter(
+        is_read=True,
+        is_archived=True,
+        updated_at__lt=cutoff
+    ).delete()
+
+    logger.info(f"Cleaned up {deleted} old notifications")
+
+    return deleted
+```

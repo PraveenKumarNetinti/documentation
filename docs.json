@@ -24,14 +24,38 @@
           {
             "group": "Phase-1",
             "pages": [
-              "phase-1/index"
+              "phase-1/code-setup"
             ]
           },
           {
             "group": "Phase-2",
             "pages": [
-              "phase-2/part-1",
-              "phase-2/part-2"
+              "phase-2/core-app-model",
+              "phase-2/authentication"
+            ]
+          },
+          {
+            "group": "Phase-3",
+            "pages": [
+              "phase-3/organizations",
+              "phase-3/teams"
+            ]
+          },
+          {
+            "group": "Phase-4",
+            "pages": [
+              "phase-4/invitations",
+              "phase-4/rbac"
+            ]
+          },
+          {
+            "group": "Phase-5",
+            "pages": [
+              "phase-5/app-structure",
+              "phase-5/audit-logging",
+              "phase-5/notifications",
+              "phase-5/product-registry",
+              "phase-5/webhooks"
             ]
           }
         ]

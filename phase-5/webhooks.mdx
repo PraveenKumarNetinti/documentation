@@ -1,0 +1,980 @@
+---
+title: 'Webhooks System'
+description: 'Continuing with a**Webhooks System**.'
+sidebarTitle: 'Webhooks System'
+---
+
+### `apps/webhooks/apps.py`
+
+```python
+from django.apps import AppConfig
+
+
+class WebhooksConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.webhooks'
+    verbose_name = 'Webhooks'
+```
+
+### `apps/webhooks/models.py`
+
+```python
+"""
+Webhook models.
+"""
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+from apps.core.models import BaseModel
+from apps.core.utils import generate_random_token, generate_secure_hash
+from apps.organizations.models import Organization
+from apps.authentication.models import User
+
+
+class Webhook(BaseModel):
+    """
+    Webhook endpoint configuration.
+    """
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='webhooks'
+    )
+    
+    # Endpoint
+    url = models.URLField(
+        max_length=500,
+        help_text=_('Webhook endpoint URL')
+    )
+    description = models.TextField(blank=True)
+    
+    # Events to listen to
+    events = models.JSONField(
+        default=list,
+        help_text=_('List of event types to subscribe to')
+    )
+    
+    # Security
+    secret = models.CharField(
+        max_length=100,
+        help_text=_('Secret key for signing webhook payloads')
+    )
+    secret_hash = models.CharField(max_length=255)
+    
+    # Status
+    is_active = models.BooleanField(default=True, db_index=True)
+    
+    # Configuration
+    headers = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Additional HTTP headers to send')
+    )
+    timeout = models.IntegerField(
+        default=30,
+        help_text=_('Request timeout in seconds')
+    )
+    
+    # Retry configuration
+    max_retries = models.IntegerField(default=3)
+    retry_delay = models.IntegerField(
+        default=60,
+        help_text=_('Delay between retries in seconds')
+    )
+    
+    # Statistics
+    total_deliveries = models.PositiveIntegerField(default=0)
+    successful_deliveries = models.PositiveIntegerField(default=0)
+    failed_deliveries = models.PositiveIntegerField(default=0)
+    last_delivery_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    last_failure_at = models.DateTimeField(null=True, blank=True)
+    
+    # Tracking
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='webhooks_created'
+    )
+
+    class Meta:
+        db_table = 'webhooks'
+        verbose_name = _('webhook')
+        verbose_name_plural = _('webhooks')
+        indexes = [
+            models.Index(fields=['organization', 'is_active']),
+        ]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.organization.name} - {self.url}"
+
+    def save(self, *args, **kwargs):
+        if not self.secret:
+            self.secret = generate_random_token(32)
+            self.secret_hash = generate_secure_hash(self.secret)
+        super().save(*args, **kwargs)
+
+    def rotate_secret(self):
+        """Generate a new secret."""
+        self.secret = generate_random_token(32)
+        self.secret_hash = generate_secure_hash(self.secret)
+        self.save(update_fields=['secret', 'secret_hash'])
+
+    def increment_stats(self, success: bool):
+        """Increment delivery statistics."""
+        from django.utils import timezone
+        
+        self.total_deliveries += 1
+        self.last_delivery_at = timezone.now()
+        
+        if success:
+            self.successful_deliveries += 1
+            self.last_success_at = timezone.now()
+        else:
+            self.failed_deliveries += 1
+            self.last_failure_at = timezone.now()
+        
+        self.save(update_fields=[
+            'total_deliveries',
+            'successful_deliveries',
+            'failed_deliveries',
+            'last_delivery_at',
+            'last_success_at',
+            'last_failure_at',
+        ])
+
+
+class WebhookDelivery(BaseModel):
+    """
+    Record of webhook delivery attempts.
+    """
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('sent', 'Sent'),
+        ('failed', 'Failed'),
+        ('retrying', 'Retrying'),
+    ]
+
+    webhook = models.ForeignKey(
+        Webhook,
+        on_delete=models.CASCADE,
+        related_name='deliveries'
+    )
+    
+    # Event details
+    event_type = models.CharField(max_length=100, db_index=True)
+    payload = models.JSONField(
+        help_text=_('Event payload sent to webhook')
+    )
+    
+    # Delivery details
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending',
+        db_index=True
+    )
+    
+    # Request/Response
+    request_headers = models.JSONField(default=dict, blank=True)
+    response_status_code = models.IntegerField(null=True, blank=True)
+    response_body = models.TextField(blank=True)
+    response_headers = models.JSONField(default=dict, blank=True)
+    
+    # Timing
+    sent_at = models.DateTimeField(null=True, blank=True)
+    response_time_ms = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text=_('Response time in milliseconds')
+    )
+    
+    # Retry tracking
+    attempt = models.IntegerField(default=1)
+    max_attempts = models.IntegerField(default=3)
+    next_retry_at = models.DateTimeField(null=True, blank=True)
+    
+    # Error tracking
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'webhook_deliveries'
+        verbose_name = _('webhook delivery')
+        verbose_name_plural = _('webhook deliveries')
+        indexes = [
+            models.Index(fields=['webhook', 'status']),
+            models.Index(fields=['event_type', 'created_at']),
+            models.Index(fields=['status', 'next_retry_at']),
+        ]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.event_type} to {self.webhook.url} ({self.status})"
+
+    @property
+    def is_successful(self):
+        """Check if delivery was successful."""
+        return (
+            self.status == 'sent' and
+            self.response_status_code and
+            200 <= self.response_status_code < 300
+        )
+
+    @property
+    def can_retry(self):
+        """Check if delivery can be retried."""
+        return (
+            self.status in ['failed', 'retrying'] and
+            self.attempt < self.max_attempts
+        )
+
+
+class WebhookEvent(BaseModel):
+    """
+    Registry of webhook event types.
+    """
+    code = models.CharField(max_length=100, unique=True, db_index=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    category = models.CharField(max_length=50)
+    
+    # Schema
+    payload_schema = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('JSON schema for event payload')
+    )
+    
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'webhook_events'
+        verbose_name = _('webhook event')
+        verbose_name_plural = _('webhook events')
+        ordering = ['category', 'code']
+
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+```
+
+### `apps/webhooks/services.py`
+
+```python
+"""
+Webhook services.
+"""
+import logging
+import hmac
+import hashlib
+import json
+import requests
+from typing import Dict, List, Optional
+from django.db import transaction
+from django.utils import timezone
+from datetime import timedelta
+
+from apps.organizations.models import Organization
+from .models import Webhook, WebhookDelivery
+
+logger = logging.getLogger(__name__)
+
+
+class WebhookService:
+    """
+    Service for managing and delivering webhooks.
+    """
+
+    @staticmethod
+    def create_delivery(
+        webhook: Webhook,
+        event_type: str,
+        payload: Dict
+    ) -> WebhookDelivery:
+        """
+        Create a webhook delivery record.
+        """
+        return WebhookDelivery.objects.create(
+            webhook=webhook,
+            event_type=event_type,
+            payload=payload,
+            max_attempts=webhook.max_retries,
+        )
+
+    @staticmethod
+    def sign_payload(payload: str, secret: str) -> str:
+        """
+        Generate HMAC signature for payload.
+        """
+        return hmac.new(
+            secret.encode(),
+            payload.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+    @staticmethod
+    def deliver(delivery: WebhookDelivery) -> bool:
+        """
+        Deliver a webhook.
+        
+        Returns:
+            bool: True if successful
+        """
+        webhook = delivery.webhook
+
+        # Prepare payload
+        payload_str = json.dumps(delivery.payload)
+        
+        # Generate signature
+        signature = WebhookService.sign_payload(payload_str, webhook.secret)
+        
+        # Prepare headers
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'SaaS-Platform-Webhooks/1.0',
+            'X-Webhook-Signature': signature,
+            'X-Webhook-Event': delivery.event_type,
+            'X-Webhook-Delivery-ID': str(delivery.id),
+            'X-Webhook-Attempt': str(delivery.attempt),
+        }
+        
+        # Add custom headers
+        if webhook.headers:
+            headers.update(webhook.headers)
+
+        delivery.request_headers = headers
+        delivery.sent_at = timezone.now()
+        
+        try:
+            start_time = timezone.now()
+            
+            response = requests.post(
+                webhook.url,
+                data=payload_str,
+                headers=headers,
+                timeout=webhook.timeout,
+            )
+            
+            end_time = timezone.now()
+            response_time = (end_time - start_time).total_seconds() * 1000
+
+            # Record response
+            delivery.response_status_code = response.status_code
+            delivery.response_body = response.text[:1000]  # Limit size
+            delivery.response_headers = dict(response.headers)
+            delivery.response_time_ms = int(response_time)
+
+            # Check if successful
+            if 200 <= response.status_code < 300:
+                delivery.status = 'sent'
+                webhook.increment_stats(success=True)
+                delivery.save()
+                
+                logger.info(
+                    f"Webhook delivered successfully: {delivery.event_type} to {webhook.url}",
+                    extra={'delivery_id': str(delivery.id)}
+                )
+                return True
+            else:
+                raise Exception(f"HTTP {response.status_code}: {response.text[:200]}")
+
+        except Exception as e:
+            delivery.error_message = str(e)[:500]
+            delivery.status = 'failed'
+            webhook.increment_stats(success=False)
+
+            # Schedule retry
+            if delivery.can_retry:
+                delivery.attempt += 1
+                delivery.status = 'retrying'
+                
+                # Exponential backoff
+                delay = webhook.retry_delay * (2 ** (delivery.attempt - 1))
+                delivery.next_retry_at = timezone.now() + timedelta(seconds=delay)
+                
+                logger.warning(
+                    f"Webhook failed, will retry: {delivery.event_type}",
+                    extra={'delivery_id': str(delivery.id), 'error': str(e)}
+                )
+            else:
+                logger.error(
+                    f"Webhook failed permanently: {delivery.event_type}",
+                    extra={'delivery_id': str(delivery.id), 'error': str(e)}
+                )
+
+            delivery.save()
+            return False
+
+    @staticmethod
+    def trigger_event(
+        organization: Organization,
+        event_type: str,
+        payload: Dict
+    ) -> List[WebhookDelivery]:
+        """
+        Trigger webhook event for all subscribed webhooks.
+        
+        Returns:
+            List of created deliveries
+        """
+        # Get active webhooks subscribed to this event
+        webhooks = Webhook.objects.filter(
+            organization=organization,
+            is_active=True,
+            events__contains=[event_type]
+        )
+
+        deliveries = []
+        for webhook in webhooks:
+            delivery = WebhookService.create_delivery(
+                webhook=webhook,
+                event_type=event_type,
+                payload=payload
+            )
+            deliveries.append(delivery)
+
+            # Queue for async delivery
+            from .tasks import deliver_webhook
+            deliver_webhook.delay(str(delivery.id))
+
+        return deliveries
+
+    @staticmethod
+    def retry_failed_deliveries():
+        """
+        Retry failed webhook deliveries.
+        """
+        # Get deliveries ready for retry
+        now = timezone.now()
+        deliveries = WebhookDelivery.objects.filter(
+            status='retrying',
+            next_retry_at__lte=now
+        ).select_related('webhook')
+
+        count = 0
+        for delivery in deliveries:
+            from .tasks import deliver_webhook
+            deliver_webhook.delay(str(delivery.id))
+            count += 1
+
+        logger.info(f"Queued {count} webhook deliveries for retry")
+        return count
+```
+
+### `apps/webhooks/serializers.py`
+
+```python
+"""
+Webhook serializers.
+"""
+from rest_framework import serializers
+from .models import Webhook, WebhookDelivery, WebhookEvent
+
+
+class WebhookSerializer(serializers.ModelSerializer):
+    """Serializer for Webhook model."""
+    class Meta:
+        model = Webhook
+        fields = [
+            'id',
+            'url',
+            'description',
+            'events',
+            'is_active',
+            'headers',
+            'timeout',
+            'max_retries',
+            'total_deliveries',
+            'successful_deliveries',
+            'failed_deliveries',
+            'last_delivery_at',
+            'last_success_at',
+            'last_failure_at',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id',
+            'total_deliveries',
+            'successful_deliveries',
+            'failed_deliveries',
+            'last_delivery_at',
+            'last_success_at',
+            'last_failure_at',
+            'created_at',
+        ]
+
+
+class WebhookCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating webhooks."""
+    class Meta:
+        model = Webhook
+        fields = [
+            'url',
+            'description',
+            'events',
+            'headers',
+            'timeout',
+            'max_retries',
+        ]
+
+
+class WebhookSecretSerializer(serializers.Serializer):
+    """Serializer for webhook secret response."""
+    secret = serializers.CharField(read_only=True)
+
+
+class WebhookDeliverySerializer(serializers.ModelSerializer):
+    """Serializer for WebhookDelivery model."""
+    is_successful = serializers.BooleanField(read_only=True)
+    can_retry = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = WebhookDelivery
+        fields = [
+            'id',
+            'event_type',
+            'status',
+            'attempt',
+            'max_attempts',
+            'response_status_code',
+            'response_time_ms',
+            'error_message',
+            'sent_at',
+            'next_retry_at',
+            'is_successful',
+            'can_retry',
+            'created_at',
+        ]
+
+
+class WebhookEventSerializer(serializers.ModelSerializer):
+    """Serializer for WebhookEvent model."""
+    class Meta:
+        model = WebhookEvent
+        fields = [
+            'id',
+            'code',
+            'name',
+            'description',
+            'category',
+        ]
+```
+
+### `apps/webhooks/views.py`
+
+```python
+"""
+Webhook views.
+"""
+from rest_framework import generics, views, status
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiResponse
+from django.shortcuts import get_object_or_404
+
+from apps.core.permissions import IsOrganizationMember
+from apps.rbac.permissions import HasPermission
+from apps.organizations.models import Organization
+from .models import Webhook, WebhookDelivery, WebhookEvent
+from .serializers import (
+    WebhookSerializer,
+    WebhookCreateSerializer,
+    WebhookSecretSerializer,
+    WebhookDeliverySerializer,
+    WebhookEventSerializer,
+)
+from .services import WebhookService
+
+
+class OrganizationWebhookMixin:
+    """Mixin to get organization from URL."""
+    def get_organization(self):
+        org_id = self.kwargs.get('org_id')
+        return get_object_or_404(Organization, id=org_id)
+
+
+@extend_schema(tags=['Webhooks'])
+class WebhookListView(OrganizationWebhookMixin, generics.ListAPIView):
+    """List organization webhooks."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'webhooks.read'
+    serializer_class = WebhookSerializer
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return Webhook.objects.filter(organization=organization)
+
+
+@extend_schema(tags=['Webhooks'])
+class WebhookCreateView(OrganizationWebhookMixin, views.APIView):
+    """Create a webhook."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'webhooks.create'
+
+    @extend_schema(
+        summary="Create webhook",
+        request=WebhookCreateSerializer,
+        responses={201: WebhookSerializer}
+    )
+    def post(self, request, org_id):
+        organization = self.get_organization()
+
+        serializer = WebhookCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        webhook = Webhook.objects.create(
+            organization=organization,
+            created_by=request.user,
+            **serializer.validated_data
+        )
+
+        # Return webhook with secret (only shown once)
+        response_data = WebhookSerializer(webhook).data
+        response_data['secret'] = webhook.secret
+
+        return Response({
+            'data': response_data,
+            'message': 'Webhook created. Save the secret - it won\'t be shown again.'
+        }, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(tags=['Webhooks'])
+class WebhookDetailView(OrganizationWebhookMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Get/Update/Delete webhook."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'webhooks.read'
+    serializer_class = WebhookSerializer
+    lookup_url_kwarg = 'webhook_id'
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return Webhook.objects.filter(organization=organization)
+
+
+@extend_schema(tags=['Webhooks'])
+class WebhookRotateSecretView(OrganizationWebhookMixin, views.APIView):
+    """Rotate webhook secret."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'webhooks.update'
+
+    @extend_schema(
+        summary="Rotate webhook secret",
+        responses={200: WebhookSecretSerializer}
+    )
+    def post(self, request, org_id, webhook_id):
+        organization = self.get_organization()
+        webhook = get_object_or_404(
+            Webhook,
+            id=webhook_id,
+            organization=organization
+        )
+
+        webhook.rotate_secret()
+
+        return Response({
+            'data': {'secret': webhook.secret},
+            'message': 'Secret rotated successfully. Update your webhook handler.'
+        })
+
+
+@extend_schema(tags=['Webhooks'])
+class WebhookTestView(OrganizationWebhookMixin, views.APIView):
+    """Test a webhook."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'webhooks.test'
+
+    @extend_schema(
+        summary="Test webhook",
+        responses={200: OpenApiResponse(description="Test result")}
+    )
+    def post(self, request, org_id, webhook_id):
+        organization = self.get_organization()
+        webhook = get_object_or_404(
+            Webhook,
+            id=webhook_id,
+            organization=organization
+        )
+
+        # Create test delivery
+        delivery = WebhookService.create_delivery(
+            webhook=webhook,
+            event_type='test.event',
+            payload={
+                'test': True,
+                'message': 'This is a test webhook delivery',
+                'timestamp': timezone.now().isoformat(),
+            }
+        )
+
+        # Deliver synchronously
+        success = WebhookService.deliver(delivery)
+
+        return Response({
+            'data': WebhookDeliverySerializer(delivery).data,
+            'message': 'Test delivery sent.' if success else 'Test delivery failed.'
+        })
+
+
+@extend_schema(tags=['Webhooks'])
+class WebhookDeliveryListView(OrganizationWebhookMixin, generics.ListAPIView):
+    """List webhook deliveries."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'webhooks.read'
+    serializer_class = WebhookDeliverySerializer
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        webhook_id = self.kwargs.get('webhook_id')
+
+        return WebhookDelivery.objects.filter(
+            webhook_id=webhook_id,
+            webhook__organization=organization
+        ).order_by('-created_at')
+
+
+@extend_schema(tags=['Webhooks'])
+class WebhookDeliveryDetailView(OrganizationWebhookMixin, generics.RetrieveAPIView):
+    """Get webhook delivery details."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'webhooks.read'
+    serializer_class = WebhookDeliverySerializer
+    lookup_url_kwarg = 'delivery_id'
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return WebhookDelivery.objects.filter(
+            webhook__organization=organization
+        )
+
+
+@extend_schema(tags=['Webhooks'])
+class WebhookDeliveryRetryView(OrganizationWebhookMixin, views.APIView):
+    """Retry webhook delivery."""
+    permission_classes = [IsAuthenticated, IsOrganizationMember, HasPermission]
+    permission_required = 'webhooks.manage'
+
+    @extend_schema(
+        summary="Retry webhook delivery",
+        responses={200: OpenApiResponse(description="Delivery queued for retry")}
+    )
+    def post(self, request, org_id, webhook_id, delivery_id):
+        organization = self.get_organization()
+        delivery = get_object_or_404(
+            WebhookDelivery,
+            id=delivery_id,
+            webhook_id=webhook_id,
+            webhook__organization=organization
+        )
+
+        if not delivery.can_retry:
+            return Response({
+                'error': 'Delivery cannot be retried (max attempts reached).'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Queue for retry
+        from .tasks import deliver_webhook
+        deliver_webhook.delay(str(delivery.id))
+
+        return Response({
+            'message': 'Delivery queued for retry.'
+        })
+
+
+@extend_schema(tags=['Webhooks - Events'])
+class WebhookEventListView(generics.ListAPIView):
+    """List available webhook events."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = WebhookEventSerializer
+
+    def get_queryset(self):
+        return WebhookEvent.objects.filter(is_active=True)
+```
+
+### `apps/webhooks/urls.py`
+
+```python
+"""
+Webhook URL patterns.
+"""
+from django.urls import path
+from .views import (
+    WebhookListView,
+    WebhookCreateView,
+    WebhookDetailView,
+    WebhookRotateSecretView,
+    WebhookTestView,
+    WebhookDeliveryListView,
+    WebhookDeliveryDetailView,
+    WebhookDeliveryRetryView,
+    WebhookEventListView,
+)
+
+app_name = 'webhooks'
+
+urlpatterns = [
+    # Webhooks
+    path(
+        'organizations/<uuid:org_id>/webhooks/',
+        WebhookListView.as_view(),
+        name='list'
+    ),
+    path(
+        'organizations/<uuid:org_id>/webhooks/create/',
+        WebhookCreateView.as_view(),
+        name='create'
+    ),
+    path(
+        'organizations/<uuid:org_id>/webhooks/<uuid:webhook_id>/',
+        WebhookDetailView.as_view(),
+        name='detail'
+    ),
+    path(
+        'organizations/<uuid:org_id>/webhooks/<uuid:webhook_id>/rotate-secret/',
+        WebhookRotateSecretView.as_view(),
+        name='rotate-secret'
+    ),
+    path(
+        'organizations/<uuid:org_id>/webhooks/<uuid:webhook_id>/test/',
+        WebhookTestView.as_view(),
+        name='test'
+    ),
+
+    # Deliveries
+    path(
+        'organizations/<uuid:org_id>/webhooks/<uuid:webhook_id>/deliveries/',
+        WebhookDeliveryListView.as_view(),
+        name='deliveries-list'
+    ),
+    path(
+        'organizations/<uuid:org_id>/webhooks/<uuid:webhook_id>/deliveries/<uuid:delivery_id>/',
+        WebhookDeliveryDetailView.as_view(),
+        name='deliveries-detail'
+    ),
+    path(
+        'organizations/<uuid:org_id>/webhooks/<uuid:webhook_id>/deliveries/<uuid:delivery_id>/retry/',
+        WebhookDeliveryRetryView.as_view(),
+        name='deliveries-retry'
+    ),
+
+    # Events
+    path(
+        'webhooks/events/',
+        WebhookEventListView.as_view(),
+        name='events-list'
+    ),
+]
+```
+
+### `apps/webhooks/tasks.py`
+
+```python
+"""
+Celery tasks for webhooks.
+"""
+import logging
+from celery import shared_task
+from .services import WebhookService
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(bind=True, max_retries=0)  # Manual retry handling
+def deliver_webhook(self, delivery_id: str):
+    """Deliver a webhook."""
+    try:
+        from .models import WebhookDelivery
+        
+        delivery = WebhookDelivery.objects.select_related('webhook').get(id=delivery_id)
+        WebhookService.deliver(delivery)
+
+    except Exception as exc:
+        logger.error(f"Webhook delivery task failed: {exc}")
+
+
+@shared_task
+def retry_failed_webhooks():
+    """
+    Retry failed webhook deliveries.
+    Runs periodically via celery beat.
+    """
+    count = WebhookService.retry_failed_deliveries()
+    logger.info(f"Retried {count} webhook deliveries")
+    return count
+```
+
+### `apps/webhooks/admin.py`
+
+```python
+"""
+Admin configuration for webhooks.
+"""
+from django.contrib import admin
+from .models import Webhook, WebhookDelivery, WebhookEvent
+
+
+@admin.register(Webhook)
+class WebhookAdmin(admin.ModelAdmin):
+    """Admin for Webhook model."""
+    list_display = [
+        'organization',
+        'url',
+        'is_active',
+        'total_deliveries',
+        'successful_deliveries',
+        'failed_deliveries',
+        'created_at',
+    ]
+    list_filter = ['is_active', 'created_at']
+    search_fields = ['organization__name', 'url']
+    readonly_fields = [
+        'secret_hash',
+        'total_deliveries',
+        'successful_deliveries',
+        'failed_deliveries',
+        'last_delivery_at',
+        'last_success_at',
+        'last_failure_at',
+    ]
+    raw_id_fields = ['organization', 'created_by']
+
+
+@admin.register(WebhookDelivery)
+class WebhookDeliveryAdmin(admin.ModelAdmin):
+    """Admin for WebhookDelivery model."""
+    list_display = [
+        'webhook',
+        'event_type',
+        'status',
+        'attempt',
+        'response_status_code',
+        'sent_at',
+    ]
+    list_filter = ['status', 'event_type', 'sent_at']
+    search_fields = ['webhook__url', 'event_type']
+    readonly_fields = [
+        'webhook',
+        'event_type',
+        'payload',
+        'status',
+        'request_headers',
+        'response_status_code',
+        'response_body',
+        'response_headers',
+        'sent_at',
+        'response_time_ms',
+        'attempt',
+        'error_message',
+    ]
+    raw_id_fields = ['webhook']
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(WebhookEvent)
+class WebhookEventAdmin(admin.ModelAdmin):
+    """Admin for WebhookEvent model."""
+    list_display = ['code', 'name', 'category', 'is_active']
+    list_filter = ['category', 'is_active']
+    search_fields = ['code', 'name']
+```

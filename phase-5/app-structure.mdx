@@ -1,0 +1,61 @@
+---
+title: 'App Structures'
+description: 'Folder structure for Audit, Notifications, Products & Webhooks'
+---
+
+```
+apps/
+├── audit/
+│   ├── __init__.py
+│   ├── apps.py
+│   ├── models.py          # AuditLog, AuditEvent
+│   ├── managers.py
+│   ├── serializers.py
+│   ├── views.py
+│   ├── urls.py
+│   ├── services.py
+│   ├── middleware.py      # Auto-capture middleware
+│   ├── signals.py
+│   ├── tasks.py
+│   └── admin.py
+│
+├── notifications/
+│   ├── __init__.py
+│   ├── apps.py
+│   ├── models.py          # Notification, Preference
+│   ├── managers.py
+│   ├── serializers.py
+│   ├── views.py
+│   ├── urls.py
+│   ├── services.py
+│   ├── channels/          # Email, InApp, Webhook
+│   │   ├── __init__.py
+│   │   ├── base.py
+│   │   ├── email.py
+│   │   └── in_app.py
+│   ├── tasks.py
+│   └── admin.py
+│
+├── products/
+│   ├── __init__.py
+│   ├── apps.py
+│   ├── models.py          # Product, OrgProduct, ProductMember
+│   ├── serializers.py
+│   ├── views.py
+│   ├── urls.py
+│   ├── services.py
+│   ├── registry.py        # Plugin registration
+│   ├── base.py            # BaseProduct interface
+│   └── admin.py
+│
+└── webhooks/
+    ├── __init__.py
+    ├── apps.py
+    ├── models.py          # Webhook, WebhookDelivery
+    ├── serializers.py
+    ├── views.py
+    ├── urls.py
+    ├── services.py
+    ├── tasks.py
+    └── admin.py
+```

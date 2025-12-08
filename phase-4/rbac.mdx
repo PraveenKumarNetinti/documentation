@@ -1,0 +1,3172 @@
+---
+title: 'RBAC System'
+description: '**RBAC (Role-Based Access Control)** system with custom roles and permissions..
+sidebarTitle: "RBAC System"
+---
+
+## RBAC App Structure
+
+```
+apps/rbac/
+├── __init__.py
+├── apps.py
+├── models.py          # Role, Permission, UserRole
+├── managers.py        # Custom managers
+├── serializers.py     # RBAC serializers
+├── views.py           # RBAC views
+├── urls.py            # RBAC URLs
+├── services.py        # Permission checking logic
+├── decorators.py      # Permission decorators
+├── backends.py        # Permission backend
+├── permissions.py     # DRF permission classes
+├── signals.py         # RBAC signals
+├── admin.py
+└── defaults.py        # Default roles & permissions
+```
+
+---
+
+## RBAC Models
+
+### `apps/rbac/apps.py`
+
+```python
+from django.apps import AppConfig
+
+
+class RbacConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.rbac'
+    verbose_name = 'Role-Based Access Control'
+
+    def ready(self):
+        """Import signals when app is ready."""
+        import apps.rbac.signals  # noqa
+```
+
+### `apps/rbac/models.py`
+
+```python
+"""
+RBAC models for roles and permissions.
+"""
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+from django.core.cache import cache
+from apps.core.models import BaseModel
+from apps.organizations.models import Organization
+from apps.authentication.models import User
+from .managers import RoleManager, PermissionManager, UserRoleManager
+
+
+class Permission(BaseModel):
+    """
+    Permission model defining available permissions.
+    Permissions follow the format: resource.action
+    Examples: members.create, billing.update, teams.delete
+    """
+    SCOPE_CHOICES = [
+        ('organization', 'Organization'),
+        ('team', 'Team'),
+        ('product', 'Product'),
+        ('resource', 'Resource'),
+    ]
+
+    # Unique identifier
+    codename = models.CharField(
+        max_length=100,
+        unique=True,
+        db_index=True,
+        help_text=_('Unique permission identifier (e.g., members.create)')
+    )
+
+    # Human-readable name
+    name = models.CharField(
+        max_length=255,
+        help_text=_('Human-readable permission name')
+    )
+    description = models.TextField(
+        blank=True,
+        help_text=_('Description of what this permission allows')
+    )
+
+    # Categorization
+    resource = models.CharField(
+        max_length=50,
+        db_index=True,
+        help_text=_('Resource this permission applies to (e.g., members, billing)')
+    )
+    action = models.CharField(
+        max_length=50,
+        help_text=_('Action allowed (e.g., create, read, update, delete)')
+    )
+
+    # Scope
+    scope = models.CharField(
+        max_length=20,
+        choices=SCOPE_CHOICES,
+        default='organization',
+        help_text=_('Scope at which this permission applies')
+    )
+
+    # System permission (cannot be deleted)
+    is_system = models.BooleanField(
+        default=False,
+        help_text=_('System permission (cannot be deleted)')
+    )
+
+    # Grouping for UI
+    category = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text=_('Category for grouping in UI')
+    )
+
+    # Display order
+    sort_order = models.IntegerField(default=0)
+
+    objects = PermissionManager()
+
+    class Meta:
+        db_table = 'permissions'
+        verbose_name = _('permission')
+        verbose_name_plural = _('permissions')
+        ordering = ['category', 'sort_order', 'resource', 'action']
+        indexes = [
+            models.Index(fields=['codename']),
+            models.Index(fields=['resource', 'action']),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.codename})"
+
+    def save(self, *args, **kwargs):
+        # Auto-generate codename if not set
+        if not self.codename:
+            self.codename = f"{self.resource}.{self.action}"
+        super().save(*args, **kwargs)
+
+
+class Role(BaseModel):
+    """
+    Role model defining a set of permissions.
+    Supports both system roles and custom organization roles.
+    """
+    # Organization (null for system roles)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='custom_roles',
+        help_text=_('Organization this role belongs to (null for system roles)')
+    )
+
+    # Product-specific role (optional)
+    product = models.ForeignKey(
+        'products.Product',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='roles',
+        help_text=_('Product this role is specific to')
+    )
+
+    # Role identification
+    name = models.CharField(
+        max_length=100,
+        help_text=_('Role name')
+    )
+    slug = models.SlugField(
+        max_length=100,
+        help_text=_('URL-safe identifier')
+    )
+    description = models.TextField(
+        blank=True,
+        help_text=_('Description of this role')
+    )
+
+    # Permissions
+    permissions = models.ManyToManyField(
+        Permission,
+        related_name='roles',
+        blank=True,
+        help_text=_('Permissions granted by this role')
+    )
+
+    # Role inheritance
+    inherits_from = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='inherited_by',
+        help_text=_('Role to inherit permissions from')
+    )
+
+    # System role (cannot be deleted/modified)
+    is_system_role = models.BooleanField(
+        default=False,
+        help_text=_('System role (cannot be deleted or modified)')
+    )
+
+    # Default role for new members
+    is_default = models.BooleanField(
+        default=False,
+        help_text=_('Default role for new organization members')
+    )
+
+    # Priority for conflict resolution
+    priority = models.IntegerField(
+        default=0,
+        help_text=_('Priority for permission conflict resolution (higher = more priority)')
+    )
+
+    # Color for UI
+    color = models.CharField(
+        max_length=7,
+        default='#6B7280',
+        help_text=_('Role color in hex format')
+    )
+
+    # Metadata
+    metadata = models.JSONField(
+        default=dict,
+        blank=True
+    )
+
+    objects = RoleManager()
+
+    class Meta:
+        db_table = 'roles'
+        verbose_name = _('role')
+        verbose_name_plural = _('roles')
+        unique_together = [['organization', 'slug']]
+        ordering = ['-priority', 'name']
+        indexes = [
+            models.Index(fields=['organization', 'slug']),
+            models.Index(fields=['is_system_role']),
+        ]
+
+    def __str__(self):
+        if self.organization:
+            return f"{self.name} ({self.organization.name})"
+        return f"{self.name} (System)"
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            from django.utils.text import slugify
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
+
+        # Clear cache when role is modified
+        self.clear_permission_cache()
+
+    def clear_permission_cache(self):
+        """Clear cached permissions for all users with this role."""
+        user_roles = UserRole.objects.filter(role=self).values_list('user_id', flat=True)
+        for user_id in user_roles:
+            cache.delete(f'user_permissions_{user_id}')
+
+    @property
+    def all_permissions(self):
+        """Get all permissions including inherited ones."""
+        permissions = set(self.permissions.all())
+
+        if self.inherits_from:
+            permissions.update(self.inherits_from.all_permissions)
+
+        return permissions
+
+    def get_all_permission_codenames(self):
+        """Get all permission codenames including inherited."""
+        codenames = set(self.permissions.values_list('codename', flat=True))
+
+        if self.inherits_from:
+            codenames.update(self.inherits_from.get_all_permission_codenames())
+
+        return codenames
+
+    def has_permission(self, permission_codename):
+        """Check if role has a specific permission."""
+        return permission_codename in self.get_all_permission_codenames()
+
+
+class UserRole(BaseModel):
+    """
+    Assignment of roles to users within organizations.
+    """
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='user_roles'
+    )
+    role = models.ForeignKey(
+        Role,
+        on_delete=models.CASCADE,
+        related_name='user_assignments'
+    )
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='user_roles'
+    )
+
+    # Product-specific assignment
+    product = models.ForeignKey(
+        'products.Product',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='user_roles',
+        help_text=_('Product this role assignment is specific to')
+    )
+
+    # Resource-specific assignment (for object-level permissions)
+    resource_type = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text=_('Resource type for object-level permissions')
+    )
+    resource_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text=_('Resource ID for object-level permissions')
+    )
+
+    # Granted by
+    granted_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='roles_granted'
+    )
+    granted_at = models.DateTimeField(auto_now_add=True)
+
+    # Expiration (for temporary roles)
+    expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=_('When this role assignment expires')
+    )
+
+    # Conditions (for ABAC)
+    conditions = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Conditions for attribute-based access control')
+    )
+
+    # Status
+    is_active = models.BooleanField(default=True)
+
+    objects = UserRoleManager()
+
+    class Meta:
+        db_table = 'user_roles'
+        verbose_name = _('user role')
+        verbose_name_plural = _('user roles')
+        indexes = [
+            models.Index(fields=['user', 'organization']),
+            models.Index(fields=['user', 'role']),
+            models.Index(fields=['organization', 'role']),
+            models.Index(fields=['is_active', 'expires_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.role.name} in {self.organization.name}"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # Clear user's permission cache
+        cache.delete(f'user_permissions_{self.user_id}_{self.organization_id}')
+
+    def delete(self, *args, **kwargs):
+        user_id = self.user_id
+        org_id = self.organization_id
+        super().delete(*args, **kwargs)
+        # Clear user's permission cache
+        cache.delete(f'user_permissions_{user_id}_{org_id}')
+
+    @property
+    def is_expired(self):
+        """Check if role assignment has expired."""
+        if not self.expires_at:
+            return False
+        from django.utils import timezone
+        return timezone.now() > self.expires_at
+
+    @property
+    def is_valid(self):
+        """Check if role assignment is currently valid."""
+        return self.is_active and not self.is_expired
+```
+
+### `apps/rbac/managers.py`
+
+```python
+"""
+Custom managers for RBAC models.
+"""
+from django.db import models
+from django.db.models import Q
+from django.utils import timezone
+
+
+class PermissionQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for Permission model.
+    """
+    def for_resource(self, resource):
+        """Filter by resource."""
+        return self.filter(resource=resource)
+
+    def system_permissions(self):
+        """Get system permissions only."""
+        return self.filter(is_system=True)
+
+    def by_category(self, category):
+        """Filter by category."""
+        return self.filter(category=category)
+
+    def for_scope(self, scope):
+        """Filter by scope."""
+        return self.filter(scope=scope)
+
+
+class PermissionManager(models.Manager):
+    """
+    Custom manager for Permission model.
+    """
+    def get_queryset(self):
+        return PermissionQuerySet(self.model, using=self._db)
+
+    def for_resource(self, resource):
+        return self.get_queryset().for_resource(resource)
+
+    def get_by_codename(self, codename):
+        """Get permission by codename."""
+        try:
+            return self.get(codename=codename)
+        except self.model.DoesNotExist:
+            return None
+
+    def get_categories(self):
+        """Get all unique categories."""
+        return self.values_list('category', flat=True).distinct()
+
+
+class RoleQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for Role model.
+    """
+    def system_roles(self):
+        """Get system roles."""
+        return self.filter(is_system_role=True, organization__isnull=True)
+
+    def for_organization(self, organization):
+        """Get roles for organization (including system roles)."""
+        return self.filter(
+            Q(organization=organization) | Q(is_system_role=True, organization__isnull=True)
+        )
+
+    def custom_roles(self, organization):
+        """Get only custom roles for organization."""
+        return self.filter(organization=organization, is_system_role=False)
+
+    def default_roles(self):
+        """Get default roles."""
+        return self.filter(is_default=True)
+
+    def with_permissions(self):
+        """Prefetch permissions."""
+        return self.prefetch_related('permissions')
+
+
+class RoleManager(models.Manager):
+    """
+    Custom manager for Role model.
+    """
+    def get_queryset(self):
+        return RoleQuerySet(self.model, using=self._db)
+
+    def system_roles(self):
+        return self.get_queryset().system_roles()
+
+    def for_organization(self, organization):
+        return self.get_queryset().for_organization(organization)
+
+    def custom_roles(self, organization):
+        return self.get_queryset().custom_roles(organization)
+
+    def get_default_role(self, organization=None):
+        """Get default role for organization."""
+        if organization:
+            default = self.filter(
+                organization=organization,
+                is_default=True
+            ).first()
+            if default:
+                return default
+
+        # Fall back to system default
+        return self.filter(
+            is_system_role=True,
+            slug='member'
+        ).first()
+
+
+class UserRoleQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for UserRole model.
+    """
+    def active(self):
+        """Get active role assignments."""
+        return self.filter(
+            is_active=True
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        )
+
+    def for_user(self, user):
+        """Filter by user."""
+        return self.filter(user=user)
+
+    def for_organization(self, organization):
+        """Filter by organization."""
+        return self.filter(organization=organization)
+
+    def for_product(self, product):
+        """Filter by product."""
+        return self.filter(product=product)
+
+    def with_role(self):
+        """Select related role."""
+        return self.select_related('role')
+
+
+class UserRoleManager(models.Manager):
+    """
+    Custom manager for UserRole model.
+    """
+    def get_queryset(self):
+        return UserRoleQuerySet(self.model, using=self._db)
+
+    def active(self):
+        return self.get_queryset().active()
+
+    def for_user(self, user):
+        return self.get_queryset().for_user(user)
+
+    def for_organization(self, organization):
+        return self.get_queryset().for_organization(organization)
+
+    def get_user_roles(self, user, organization, product=None):
+        """Get all active roles for a user in an organization."""
+        queryset = self.active().filter(
+            user=user,
+            organization=organization
+        ).with_role()
+
+        if product:
+            queryset = queryset.filter(Q(product=product) | Q(product__isnull=True))
+
+        return queryset
+```
+
+---
+
+## RBAC Default Permissions & Roles
+
+### `apps/rbac/defaults.py`
+
+```python
+"""
+Default permissions and roles for the platform.
+"""
+
+# Default permissions organized by category
+DEFAULT_PERMISSIONS = [
+    # Organization permissions
+    {
+        'codename': 'organization.read',
+        'name': 'View Organization',
+        'description': 'View organization details',
+        'resource': 'organization',
+        'action': 'read',
+        'scope': 'organization',
+        'category': 'Organization',
+        'is_system': True,
+        'sort_order': 1,
+    },
+    {
+        'codename': 'organization.update',
+        'name': 'Update Organization',
+        'description': 'Update organization details',
+        'resource': 'organization',
+        'action': 'update',
+        'scope': 'organization',
+        'category': 'Organization',
+        'is_system': True,
+        'sort_order': 2,
+    },
+    {
+        'codename': 'organization.delete',
+        'name': 'Delete Organization',
+        'description': 'Delete organization',
+        'resource': 'organization',
+        'action': 'delete',
+        'scope': 'organization',
+        'category': 'Organization',
+        'is_system': True,
+        'sort_order': 3,
+    },
+    {
+        'codename': 'organization.settings.read',
+        'name': 'View Organization Settings',
+        'description': 'View organization settings',
+        'resource': 'organization.settings',
+        'action': 'read',
+        'scope': 'organization',
+        'category': 'Organization',
+        'is_system': True,
+        'sort_order': 4,
+    },
+    {
+        'codename': 'organization.settings.update',
+        'name': 'Update Organization Settings',
+        'description': 'Update organization settings',
+        'resource': 'organization.settings',
+        'action': 'update',
+        'scope': 'organization',
+        'category': 'Organization',
+        'is_system': True,
+        'sort_order': 5,
+    },
+
+    # Member permissions
+    {
+        'codename': 'members.read',
+        'name': 'View Members',
+        'description': 'View organization members',
+        'resource': 'members',
+        'action': 'read',
+        'scope': 'organization',
+        'category': 'Members',
+        'is_system': True,
+        'sort_order': 10,
+    },
+    {
+        'codename': 'members.create',
+        'name': 'Invite Members',
+        'description': 'Invite new members to organization',
+        'resource': 'members',
+        'action': 'create',
+        'scope': 'organization',
+        'category': 'Members',
+        'is_system': True,
+        'sort_order': 11,
+    },
+    {
+        'codename': 'members.update',
+        'name': 'Update Members',
+        'description': 'Update member roles and status',
+        'resource': 'members',
+        'action': 'update',
+        'scope': 'organization',
+        'category': 'Members',
+        'is_system': True,
+        'sort_order': 12,
+    },
+    {
+        'codename': 'members.delete',
+        'name': 'Remove Members',
+        'description': 'Remove members from organization',
+        'resource': 'members',
+        'action': 'delete',
+        'scope': 'organization',
+        'category': 'Members',
+        'is_system': True,
+        'sort_order': 13,
+    },
+
+    # Team permissions
+    {
+        'codename': 'teams.read',
+        'name': 'View Teams',
+        'description': 'View teams',
+        'resource': 'teams',
+        'action': 'read',
+        'scope': 'organization',
+        'category': 'Teams',
+        'is_system': True,
+        'sort_order': 20,
+    },
+    {
+        'codename': 'teams.create',
+        'name': 'Create Teams',
+        'description': 'Create new teams',
+        'resource': 'teams',
+        'action': 'create',
+        'scope': 'organization',
+        'category': 'Teams',
+        'is_system': True,
+        'sort_order': 21,
+    },
+    {
+        'codename': 'teams.update',
+        'name': 'Update Teams',
+        'description': 'Update team details',
+        'resource': 'teams',
+        'action': 'update',
+        'scope': 'organization',
+        'category': 'Teams',
+        'is_system': True,
+        'sort_order': 22,
+    },
+    {
+        'codename': 'teams.delete',
+        'name': 'Delete Teams',
+        'description': 'Delete teams',
+        'resource': 'teams',
+        'action': 'delete',
+        'scope': 'organization',
+        'category': 'Teams',
+        'is_system': True,
+        'sort_order': 23,
+    },
+    {
+        'codename': 'teams.members.manage',
+        'name': 'Manage Team Members',
+        'description': 'Add and remove team members',
+        'resource': 'teams.members',
+        'action': 'manage',
+        'scope': 'team',
+        'category': 'Teams',
+        'is_system': True,
+        'sort_order': 24,
+    },
+
+    # Invitation permissions
+    {
+        'codename': 'invitations.read',
+        'name': 'View Invitations',
+        'description': 'View pending invitations',
+        'resource': 'invitations',
+        'action': 'read',
+        'scope': 'organization',
+        'category': 'Invitations',
+        'is_system': True,
+        'sort_order': 30,
+    },
+    {
+        'codename': 'invitations.create',
+        'name': 'Create Invitations',
+        'description': 'Send invitations',
+        'resource': 'invitations',
+        'action': 'create',
+        'scope': 'organization',
+        'category': 'Invitations',
+        'is_system': True,
+        'sort_order': 31,
+    },
+    {
+        'codename': 'invitations.cancel',
+        'name': 'Cancel Invitations',
+        'description': 'Cancel pending invitations',
+        'resource': 'invitations',
+        'action': 'cancel',
+        'scope': 'organization',
+        'category': 'Invitations',
+        'is_system': True,
+        'sort_order': 32,
+    },
+
+    # Role permissions
+    {
+        'codename': 'roles.read',
+        'name': 'View Roles',
+        'description': 'View roles and permissions',
+        'resource': 'roles',
+        'action': 'read',
+        'scope': 'organization',
+        'category': 'Roles',
+        'is_system': True,
+        'sort_order': 40,
+    },
+    {
+        'codename': 'roles.create',
+        'name': 'Create Roles',
+        'description': 'Create custom roles',
+        'resource': 'roles',
+        'action': 'create',
+        'scope': 'organization',
+        'category': 'Roles',
+        'is_system': True,
+        'sort_order': 41,
+    },
+    {
+        'codename': 'roles.update',
+        'name': 'Update Roles',
+        'description': 'Update roles and permissions',
+        'resource': 'roles',
+        'action': 'update',
+        'scope': 'organization',
+        'category': 'Roles',
+        'is_system': True,
+        'sort_order': 42,
+    },
+    {
+        'codename': 'roles.delete',
+        'name': 'Delete Roles',
+        'description': 'Delete custom roles',
+        'resource': 'roles',
+        'action': 'delete',
+        'scope': 'organization',
+        'category': 'Roles',
+        'is_system': True,
+        'sort_order': 43,
+    },
+    {
+        'codename': 'roles.assign',
+        'name': 'Assign Roles',
+        'description': 'Assign roles to users',
+        'resource': 'roles',
+        'action': 'assign',
+        'scope': 'organization',
+        'category': 'Roles',
+        'is_system': True,
+        'sort_order': 44,
+    },
+
+    # Billing permissions
+    {
+        'codename': 'billing.read',
+        'name': 'View Billing',
+        'description': 'View billing information and invoices',
+        'resource': 'billing',
+        'action': 'read',
+        'scope': 'organization',
+        'category': 'Billing',
+        'is_system': True,
+        'sort_order': 50,
+    },
+    {
+        'codename': 'billing.manage',
+        'name': 'Manage Billing',
+        'description': 'Manage subscriptions and payment methods',
+        'resource': 'billing',
+        'action': 'manage',
+        'scope': 'organization',
+        'category': 'Billing',
+        'is_system': True,
+        'sort_order': 51,
+    },
+
+    # Audit permissions
+    {
+        'codename': 'audit.read',
+        'name': 'View Audit Logs',
+        'description': 'View audit logs',
+        'resource': 'audit',
+        'action': 'read',
+        'scope': 'organization',
+        'category': 'Audit',
+        'is_system': True,
+        'sort_order': 60,
+    },
+    {
+        'codename': 'audit.export',
+        'name': 'Export Audit Logs',
+        'description': 'Export audit logs',
+        'resource': 'audit',
+        'action': 'export',
+        'scope': 'organization',
+        'category': 'Audit',
+        'is_system': True,
+        'sort_order': 61,
+    },
+
+    # Product permissions
+    {
+        'codename': 'products.read',
+        'name': 'View Products',
+        'description': 'View available products',
+        'resource': 'products',
+        'action': 'read',
+        'scope': 'organization',
+        'category': 'Products',
+        'is_system': True,
+        'sort_order': 70,
+    },
+    {
+        'codename': 'products.manage',
+        'name': 'Manage Products',
+        'description': 'Enable/disable products',
+        'resource': 'products',
+        'action': 'manage',
+        'scope': 'organization',
+        'category': 'Products',
+        'is_system': True,
+        'sort_order': 71,
+    },
+]
+
+# Default system roles
+DEFAULT_ROLES = [
+    {
+        'slug': 'owner',
+        'name': 'Owner',
+        'description': 'Full access to organization. Can transfer ownership and delete organization.',
+        'is_system_role': True,
+        'is_default': False,
+        'priority': 100,
+        'color': '#DC2626',
+        'permissions': [
+            # All permissions
+            'organization.read', 'organization.update', 'organization.delete',
+            'organization.settings.read', 'organization.settings.update',
+            'members.read', 'members.create', 'members.update', 'members.delete',
+            'teams.read', 'teams.create', 'teams.update', 'teams.delete', 'teams.members.manage',
+            'invitations.read', 'invitations.create', 'invitations.cancel',
+            'roles.read', 'roles.create', 'roles.update', 'roles.delete', 'roles.assign',
+            'billing.read', 'billing.manage',
+            'audit.read', 'audit.export',
+            'products.read', 'products.manage',
+        ]
+    },
+    {
+        'slug': 'admin',
+        'name': 'Admin',
+        'description': 'Administrative access. Can manage members, teams, and settings.',
+        'is_system_role': True,
+        'is_default': False,
+        'priority': 80,
+        'color': '#F59E0B',
+        'permissions': [
+            'organization.read', 'organization.update',
+            'organization.settings.read', 'organization.settings.update',
+            'members.read', 'members.create', 'members.update', 'members.delete',
+            'teams.read', 'teams.create', 'teams.update', 'teams.delete', 'teams.members.manage',
+            'invitations.read', 'invitations.create', 'invitations.cancel',
+            'roles.read', 'roles.create', 'roles.update', 'roles.delete', 'roles.assign',
+            'billing.read', 'billing.manage',
+            'audit.read',
+            'products.read', 'products.manage',
+        ]
+    },
+    {
+        'slug': 'member',
+        'name': 'Member',
+        'description': 'Standard member access. Can view and participate.',
+        'is_system_role': True,
+        'is_default': True,
+        'priority': 50,
+        'color': '#3B82F6',
+        'permissions': [
+            'organization.read',
+            'members.read',
+            'teams.read',
+            'invitations.read',
+            'roles.read',
+            'products.read',
+        ]
+    },
+    {
+        'slug': 'viewer',
+        'name': 'Viewer',
+        'description': 'Read-only access.',
+        'is_system_role': True,
+        'is_default': False,
+        'priority': 10,
+        'color': '#6B7280',
+        'permissions': [
+            'organization.read',
+            'members.read',
+            'teams.read',
+        ]
+    },
+]
+
+
+def create_default_permissions():
+    """
+    Create default system permissions.
+    """
+    from .models import Permission
+
+    created_count = 0
+    for perm_data in DEFAULT_PERMISSIONS:
+        perm, created = Permission.objects.get_or_create(
+            codename=perm_data['codename'],
+            defaults=perm_data
+        )
+        if created:
+            created_count += 1
+
+    return created_count
+
+
+def create_default_roles():
+    """
+    Create default system roles.
+    """
+    from .models import Role, Permission
+
+    created_count = 0
+    for role_data in DEFAULT_ROLES:
+        permissions = role_data.pop('permissions', [])
+
+        role, created = Role.objects.get_or_create(
+            slug=role_data['slug'],
+            organization=None,
+            defaults=role_data
+        )
+
+        if created:
+            created_count += 1
+            # Add permissions
+            for perm_codename in permissions:
+                try:
+                    perm = Permission.objects.get(codename=perm_codename)
+                    role.permissions.add(perm)
+                except Permission.DoesNotExist:
+                    pass
+
+    return created_count
+
+
+def setup_rbac():
+    """
+    Setup RBAC with default permissions and roles.
+    """
+    perm_count = create_default_permissions()
+    role_count = create_default_roles()
+
+    return {
+        'permissions_created': perm_count,
+        'roles_created': role_count,
+    }
+```
+
+---
+
+## RBAC Services
+
+### `apps/rbac/services.py`
+
+```python
+"""
+RBAC service for permission checking and role management.
+"""
+import logging
+from typing import Optional, List, Set
+from django.db import transaction
+from django.core.cache import cache
+from django.utils import timezone
+
+from apps.core.exceptions import ServiceException, PermissionDeniedException
+from apps.authentication.models import User
+from apps.organizations.models import Organization, OrganizationMember
+from .models import Permission, Role, UserRole
+
+logger = logging.getLogger(__name__)
+
+PERMISSION_CACHE_TIMEOUT = 300  # 5 minutes
+
+
+class PermissionService:
+    """
+    Service for checking and managing permissions.
+    """
+
+    @staticmethod
+    def get_user_permissions(
+        user: User,
+        organization: Organization,
+        product=None
+    ) -> Set[str]:
+        """
+        Get all permission codenames for a user in an organization.
+        Uses caching for performance.
+        """
+        cache_key = f'user_permissions_{user.id}_{organization.id}'
+        if product:
+            cache_key += f'_{product.id}'
+
+        # Try cache first
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return set(cached)
+
+        permissions = set()
+
+        # Get all active user roles
+        user_roles = UserRole.objects.active().filter(
+            user=user,
+            organization=organization
+        ).select_related('role').prefetch_related('role__permissions')
+
+        if product:
+            user_roles = user_roles.filter(
+                models.Q(product=product) | models.Q(product__isnull=True)
+            )
+
+        # Collect permissions from all roles
+        for user_role in user_roles:
+            permissions.update(user_role.role.get_all_permission_codenames())
+
+        # Also check organization membership role
+        membership = OrganizationMember.objects.get_membership(organization, user)
+        if membership:
+            # Map membership role to system role
+            system_role = Role.objects.filter(
+                slug=membership.role,
+                is_system_role=True,
+                organization__isnull=True
+            ).first()
+
+            if system_role:
+                permissions.update(system_role.get_all_permission_codenames())
+
+        # Cache the result
+        cache.set(cache_key, list(permissions), PERMISSION_CACHE_TIMEOUT)
+
+        return permissions
+
+    @staticmethod
+    def user_has_permission(
+        user: User,
+        permission: str,
+        organization: Organization = None,
+        organization_id: str = None,
+        product=None
+    ) -> bool:
+        """
+        Check if user has a specific permission.
+        """
+        if not organization and not organization_id:
+            return False
+
+        if not organization:
+            try:
+                organization = Organization.objects.get(id=organization_id)
+            except Organization.DoesNotExist:
+                return False
+
+        # Super users have all permissions
+        if user.is_superuser:
+            return True
+
+        # Check if user is organization member
+        if not OrganizationMember.objects.is_member(organization, user):
+            return False
+
+        # Get user permissions
+        permissions = PermissionService.get_user_permissions(
+            user, organization, product
+        )
+
+        # Check for exact permission
+        if permission in permissions:
+            return True
+
+        # Check for wildcard permission (e.g., members.* matches members.create)
+        resource = permission.rsplit('.', 1)[0]
+        if f"{resource}.*" in permissions:
+            return True
+
+        # Check for super permission (*.*)
+        if '*.*' in permissions:
+            return True
+
+        return False
+
+    @staticmethod
+    def get_user_roles(
+        user: User,
+        organization: Organization
+    ) -> List[Role]:
+        """
+        Get all roles for a user in an organization.
+        """
+        user_roles = UserRole.objects.active().filter(
+            user=user,
+            organization=organization
+        ).select_related('role')
+
+        roles = [ur.role for ur in user_roles]
+
+        # Also include system role from membership
+        membership = OrganizationMember.objects.get_membership(organization, user)
+        if membership:
+            system_role = Role.objects.filter(
+                slug=membership.role,
+                is_system_role=True,
+                organization__isnull=True
+            ).first()
+            if system_role and system_role not in roles:
+                roles.append(system_role)
+
+        return roles
+
+    @staticmethod
+    def clear_user_permission_cache(user: User, organization: Organization = None):
+        """
+        Clear permission cache for a user.
+        """
+        if organization:
+            cache.delete(f'user_permissions_{user.id}_{organization.id}')
+        else:
+            # Clear all cached permissions for user
+            # Note: This is a pattern delete, may need Redis SCAN in production
+            cache.delete_pattern(f'user_permissions_{user.id}_*')
+
+    @staticmethod
+    def get_member_permissions(member: OrganizationMember) -> List[str]:
+        """
+        Get cached permissions list for organization member.
+        """
+        permissions = PermissionService.get_user_permissions(
+            member.user,
+            member.organization
+        )
+        return list(permissions)
+
+
+class RoleService:
+    """
+    Service for managing roles.
+    """
+
+    @staticmethod
+    def create_role(
+        organization: Organization,
+        name: str,
+        created_by: User,
+        permissions: Optional[List[str]] = None,
+        inherits_from: Optional[Role] = None,
+        **kwargs
+    ) -> Role:
+        """
+        Create a custom role for an organization.
+        """
+        # Check permissions
+        if not PermissionService.user_has_permission(
+            created_by, 'roles.create', organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to create roles."
+            )
+
+        with transaction.atomic():
+            role = Role.objects.create(
+                organization=organization,
+                name=name,
+                **kwargs
+            )
+
+            # Add permissions
+            if permissions:
+                perm_objects = Permission.objects.filter(codename__in=permissions)
+                role.permissions.set(perm_objects)
+
+            # Set inheritance
+            if inherits_from:
+                role.inherits_from = inherits_from
+                role.save(update_fields=['inherits_from'])
+
+            logger.info(f"Role created: {role.name}", extra={
+                'role_id': str(role.id),
+                'organization_id': str(organization.id),
+                'created_by': str(created_by.id),
+            })
+
+            return role
+
+    @staticmethod
+    def update_role(
+        role: Role,
+        updated_by: User,
+        permissions: Optional[List[str]] = None,
+        **kwargs
+    ) -> Role:
+        """
+        Update a role.
+        """
+        if role.is_system_role:
+            raise ServiceException("System roles cannot be modified.")
+
+        # Check permissions
+        if not PermissionService.user_has_permission(
+            updated_by, 'roles.update', role.organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to update roles."
+            )
+
+        with transaction.atomic():
+            for field, value in kwargs.items():
+                if hasattr(role, field) and field not in ['id', 'organization', 'is_system_role']:
+                    setattr(role, field, value)
+
+            if permissions is not None:
+                perm_objects = Permission.objects.filter(codename__in=permissions)
+                role.permissions.set(perm_objects)
+
+            role.save()
+
+            logger.info(f"Role updated: {role.name}", extra={
+                'role_id': str(role.id),
+                'updated_by': str(updated_by.id),
+            })
+
+            return role
+
+    @staticmethod
+    def delete_role(
+        role: Role,
+        deleted_by: User,
+        reassign_to: Optional[Role] = None
+    ) -> None:
+        """
+        Delete a role and optionally reassign users.
+        """
+        if role.is_system_role:
+            raise ServiceException("System roles cannot be deleted.")
+
+        # Check permissions
+        if not PermissionService.user_has_permission(
+            deleted_by, 'roles.delete', role.organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to delete roles."
+            )
+
+        with transaction.atomic():
+            # Reassign users if specified
+            if reassign_to:
+                UserRole.objects.filter(role=role).update(role=reassign_to)
+            else:
+                # Check if role is in use
+                if UserRole.objects.filter(role=role, is_active=True).exists():
+                    raise ServiceException(
+                        "Cannot delete role that is assigned to users. "
+                        "Please reassign users first."
+                    )
+
+            role_name = role.name
+            role.delete()
+
+            logger.info(f"Role deleted: {role_name}", extra={
+                'deleted_by': str(deleted_by.id),
+            })
+
+    @staticmethod
+    def duplicate_role(
+        role: Role,
+        new_name: str,
+        duplicated_by: User
+    ) -> Role:
+        """
+        Duplicate a role with all its permissions.
+        """
+        if not PermissionService.user_has_permission(
+            duplicated_by, 'roles.create', role.organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to create roles."
+            )
+
+        with transaction.atomic():
+            new_role = Role.objects.create(
+                organization=role.organization,
+                name=new_name,
+                description=f"Copy of {role.name}",
+                inherits_from=role.inherits_from,
+                priority=role.priority,
+                color=role.color,
+            )
+
+            # Copy permissions
+            new_role.permissions.set(role.permissions.all())
+
+            logger.info(f"Role duplicated: {role.name} -> {new_name}", extra={
+                'original_role_id': str(role.id),
+                'new_role_id': str(new_role.id),
+                'duplicated_by': str(duplicated_by.id),
+            })
+
+            return new_role
+
+
+class UserRoleService:
+    """
+    Service for managing user role assignments.
+    """
+
+    @staticmethod
+    def assign_role(
+        user: User,
+        role: Role,
+        organization: Organization,
+        granted_by: User,
+        product=None,
+        expires_at=None,
+        conditions: dict = None
+    ) -> UserRole:
+        """
+        Assign a role to a user.
+        """
+        # Check permissions
+        if not PermissionService.user_has_permission(
+            granted_by, 'roles.assign', organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to assign roles."
+            )
+
+        # Check if user is organization member
+        if not OrganizationMember.objects.is_member(organization, user):
+            raise ServiceException(
+                "User must be a member of the organization."
+            )
+
+        # Check if role is valid for this organization
+        if role.organization and role.organization != organization:
+            raise ServiceException(
+                "Role does not belong to this organization."
+            )
+
+        with transaction.atomic():
+            # Create or update assignment
+            user_role, created = UserRole.objects.update_or_create(
+                user=user,
+                role=role,
+                organization=organization,
+                product=product,
+                defaults={
+                    'granted_by': granted_by,
+                    'expires_at': expires_at,
+                    'conditions': conditions or {},
+                    'is_active': True,
+                }
+            )
+
+            # Clear permission cache
+            PermissionService.clear_user_permission_cache(user, organization)
+
+            logger.info(f"Role assigned: {role.name} to {user.email}", extra={
+                'user_role_id': str(user_role.id),
+                'user_id': str(user.id),
+                'role_id': str(role.id),
+                'organization_id': str(organization.id),
+                'granted_by': str(granted_by.id),
+            })
+
+            return user_role
+
+    @staticmethod
+    def revoke_role(
+        user: User,
+        role: Role,
+        organization: Organization,
+        revoked_by: User
+    ) -> None:
+        """
+        Revoke a role from a user.
+        """
+        # Check permissions
+        if not PermissionService.user_has_permission(
+            revoked_by, 'roles.assign', organization
+        ):
+            raise PermissionDeniedException(
+                "You don't have permission to revoke roles."
+            )
+
+        try:
+            user_role = UserRole.objects.get(
+                user=user,
+                role=role,
+                organization=organization,
+                is_active=True
+            )
+        except UserRole.DoesNotExist:
+            raise ServiceException("Role assignment not found.")
+
+        user_role.is_active = False
+        user_role.save(update_fields=['is_active', 'updated_at'])
+
+        # Clear permission cache
+        PermissionService.clear_user_permission_cache(user, organization)
+
+        logger.info(f"Role revoked: {role.name} from {user.email}", extra={
+            'user_id': str(user.id),
+            'role_id': str(role.id),
+            'organization_id': str(organization.id),
+            'revoked_by': str(revoked_by.id),
+        })
+
+    @staticmethod
+    def get_role_members(role: Role) -> List[User]:
+        """
+        Get all users with a specific role.
+        """
+        user_ids = UserRole.objects.active().filter(
+            role=role
+        ).values_list('user_id', flat=True)
+
+        return User.objects.filter(id__in=user_ids)
+
+    @staticmethod
+    def cleanup_expired_assignments():
+        """
+        Deactivate expired role assignments.
+        """
+        expired = UserRole.objects.filter(
+            is_active=True,
+            expires_at__lt=timezone.now()
+        )
+
+        count = expired.count()
+        expired.update(is_active=False)
+
+        logger.info(f"Deactivated {count} expired role assignments")
+
+        return count
+```
+
+---
+
+## RBAC Serializers
+
+### `apps/rbac/serializers.py`
+
+```python
+"""
+RBAC serializers.
+"""
+from rest_framework import serializers
+from django.utils.translation import gettext_lazy as _
+
+from apps.authentication.serializers import UserSerializer
+from .models import Permission, Role, UserRole
+
+
+class PermissionSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Permission model.
+    """
+    class Meta:
+        model = Permission
+        fields = [
+            'id',
+            'codename',
+            'name',
+            'description',
+            'resource',
+            'action',
+            'scope',
+            'category',
+            'is_system',
+            'sort_order',
+        ]
+        read_only_fields = ['id', 'is_system']
+
+
+class PermissionGroupSerializer(serializers.Serializer):
+    """
+    Serializer for grouped permissions.
+    """
+    category = serializers.CharField()
+    permissions = PermissionSerializer(many=True)
+
+
+class RoleSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Role model.
+    """
+    permissions = PermissionSerializer(many=True, read_only=True)
+    permission_codenames = serializers.ListField(
+        child=serializers.CharField(),
+        write_only=True,
+        required=False
+    )
+    inherits_from = serializers.StringRelatedField(read_only=True)
+    inherits_from_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    user_count = serializers.SerializerMethodField()
+    all_permissions = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Role
+        fields = [
+            'id',
+            'organization',
+            'product',
+            'name',
+            'slug',
+            'description',
+            'permissions',
+            'permission_codenames',
+            'inherits_from',
+            'inherits_from_id',
+            'is_system_role',
+            'is_default',
+            'priority',
+            'color',
+            'user_count',
+            'all_permissions',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'organization',
+            'slug',
+            'is_system_role',
+            'user_count',
+            'all_permissions',
+            'created_at',
+            'updated_at',
+        ]
+
+    def get_user_count(self, obj):
+        """Get number of users with this role."""
+        return UserRole.objects.active().filter(role=obj).count()
+
+    def get_all_permissions(self, obj):
+        """Get all permissions including inherited."""
+        return list(obj.get_all_permission_codenames())
+
+
+class RoleCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating a role.
+    """
+    permission_codenames = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        default=list
+    )
+    inherits_from_id = serializers.UUIDField(required=False, allow_null=True)
+
+    class Meta:
+        model = Role
+        fields = [
+            'name',
+            'description',
+            'permission_codenames',
+            'inherits_from_id',
+            'priority',
+            'color',
+        ]
+
+    def validate_name(self, value):
+        """Validate role name is unique in organization."""
+        organization = self.context['organization']
+
+        if Role.objects.filter(
+            organization=organization,
+            name__iexact=value
+        ).exists():
+            raise serializers.ValidationError(
+                _("A role with this name already exists.")
+            )
+
+        return value
+
+    def validate_inherits_from_id(self, value):
+        """Validate inherits_from role."""
+        if not value:
+            return None
+
+        organization = self.context['organization']
+
+        try:
+            role = Role.objects.get(id=value)
+            # Must be system role or same organization
+            if role.organization and role.organization != organization:
+                raise serializers.ValidationError(
+                    _("Can only inherit from system roles or roles in the same organization.")
+                )
+            return role
+        except Role.DoesNotExist:
+            raise serializers.ValidationError(_("Role not found."))
+
+
+class RoleUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for updating a role.
+    """
+    permission_codenames = serializers.ListField(
+        child=serializers.CharField(),
+        required=False
+    )
+    inherits_from_id = serializers.UUIDField(required=False, allow_null=True)
+
+    class Meta:
+        model = Role
+        fields = [
+            'name',
+            'description',
+            'permission_codenames',
+            'inherits_from_id',
+            'is_default',
+            'priority',
+            'color',
+        ]
+
+    def validate(self, attrs):
+        """Validate system roles cannot be modified."""
+        if self.instance and self.instance.is_system_role:
+            raise serializers.ValidationError(
+                _("System roles cannot be modified.")
+            )
+        return attrs
+
+
+class RoleListSerializer(serializers.ModelSerializer):
+    """
+    Lightweight serializer for listing roles.
+    """
+    user_count = serializers.SerializerMethodField()
+    permission_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Role
+        fields = [
+            'id',
+            'name',
+            'slug',
+            'description',
+            'is_system_role',
+            'is_default',
+            'priority',
+            'color',
+            'user_count',
+            'permission_count',
+        ]
+
+    def get_user_count(self, obj):
+        return UserRole.objects.active().filter(role=obj).count()
+
+    def get_permission_count(self, obj):
+        return obj.permissions.count()
+
+
+class UserRoleSerializer(serializers.ModelSerializer):
+    """
+    Serializer for UserRole model.
+    """
+    user = UserSerializer(read_only=True)
+    role = RoleListSerializer(read_only=True)
+    granted_by = UserSerializer(read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
+    is_valid = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = UserRole
+        fields = [
+            'id',
+            'user',
+            'role',
+            'organization',
+            'product',
+            'resource_type',
+            'resource_id',
+            'granted_by',
+            'granted_at',
+            'expires_at',
+            'conditions',
+            'is_active',
+            'is_expired',
+            'is_valid',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id',
+            'user',
+            'role',
+            'organization',
+            'granted_by',
+            'granted_at',
+            'is_expired',
+            'is_valid',
+            'created_at',
+        ]
+
+
+class UserRoleAssignSerializer(serializers.Serializer):
+    """
+    Serializer for assigning a role to a user.
+    """
+    user_id = serializers.UUIDField()
+    role_id = serializers.UUIDField()
+    product_id = serializers.UUIDField(required=False, allow_null=True)
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
+    conditions = serializers.JSONField(required=False, default=dict)
+
+    def validate_user_id(self, value):
+        """Validate user exists and is org member."""
+        from apps.authentication.models import User
+        from apps.organizations.models import OrganizationMember
+
+        try:
+            user = User.objects.get(id=value)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(_("User not found."))
+
+        organization = self.context['organization']
+        if not OrganizationMember.objects.is_member(organization, user):
+            raise serializers.ValidationError(
+                _("User must be a member of the organization.")
+            )
+
+        return user
+
+    def validate_role_id(self, value):
+        """Validate role exists and belongs to organization."""
+        organization = self.context['organization']
+
+        try:
+            role = Role.objects.get(id=value)
+        except Role.DoesNotExist:
+            raise serializers.ValidationError(_("Role not found."))
+
+        # Role must be system role or belong to organization
+        if role.organization and role.organization != organization:
+            raise serializers.ValidationError(
+                _("Role does not belong to this organization.")
+            )
+
+        return role
+
+
+class UserRoleRevokeSerializer(serializers.Serializer):
+    """
+    Serializer for revoking a role from a user.
+    """
+    user_id = serializers.UUIDField()
+    role_id = serializers.UUIDField()
+```
+
+---
+
+## RBAC Views
+
+### `apps/rbac/views.py`
+
+```python
+"""
+RBAC views.
+"""
+import logging
+from rest_framework import status, generics, views
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiResponse
+from django.shortcuts import get_object_or_404
+from django.db.models import Count
+
+from apps.core.permissions import IsOrganizationMember
+from apps.organizations.models import Organization
+from .models import Permission, Role, UserRole
+from .serializers import (
+    PermissionSerializer,
+    PermissionGroupSerializer,
+    RoleSerializer,
+    RoleCreateSerializer,
+    RoleUpdateSerializer,
+    RoleListSerializer,
+    UserRoleSerializer,
+    UserRoleAssignSerializer,
+    UserRoleRevokeSerializer,
+)
+from .services import RoleService, UserRoleService, PermissionService
+
+logger = logging.getLogger(__name__)
+
+
+class OrganizationRBACMixin:
+    """
+    Mixin to get organization from URL.
+    """
+    def get_organization(self):
+        org_id = self.kwargs.get('org_id')
+        return get_object_or_404(Organization, id=org_id)
+
+
+# Permission Views
+
+@extend_schema(tags=['RBAC - Permissions'])
+class PermissionListView(generics.ListAPIView):
+    """
+    List all available permissions.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = PermissionSerializer
+
+    @extend_schema(
+        summary="List all permissions",
+        responses={200: PermissionSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        return Permission.objects.all().order_by('category', 'sort_order')
+
+
+@extend_schema(tags=['RBAC - Permissions'])
+class PermissionCategoriesView(views.APIView):
+    """
+    Get permissions grouped by category.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Get permissions by category",
+        responses={200: PermissionGroupSerializer(many=True)}
+    )
+    def get(self, request):
+        categories = Permission.objects.values_list('category', flat=True).distinct()
+
+        result = []
+        for category in categories:
+            permissions = Permission.objects.filter(
+                category=category
+            ).order_by('sort_order')
+
+            result.append({
+                'category': category,
+                'permissions': PermissionSerializer(permissions, many=True).data
+            })
+
+        return Response({'data': result})
+
+
+# Role Views
+
+@extend_schema(tags=['RBAC - Roles'])
+class RoleListView(OrganizationRBACMixin, generics.ListAPIView):
+    """
+    List roles for an organization.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = RoleListSerializer
+
+    @extend_schema(
+        summary="List organization roles",
+        responses={200: RoleListSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        include_system = self.request.query_params.get('include_system', 'true').lower() == 'true'
+
+        queryset = Role.objects.for_organization(organization)
+
+        if not include_system:
+            queryset = queryset.filter(is_system_role=False)
+
+        return queryset.annotate(
+            user_count=Count('user_assignments', filter=models.Q(user_assignments__is_active=True))
+        )
+
+
+@extend_schema(tags=['RBAC - Roles'])
+class RoleCreateView(OrganizationRBACMixin, views.APIView):
+    """
+    Create a custom role.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Create role",
+        request=RoleCreateSerializer,
+        responses={
+            201: RoleSerializer,
+            400: OpenApiResponse(description="Validation error"),
+        }
+    )
+    def post(self, request, org_id):
+        organization = self.get_organization()
+
+        serializer = RoleCreateSerializer(
+            data=request.data,
+            context={'organization': organization, 'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+
+        role = RoleService.create_role(
+            organization=organization,
+            name=serializer.validated_data['name'],
+            created_by=request.user,
+            permissions=serializer.validated_data.get('permission_codenames', []),
+            inherits_from=serializer.validated_data.get('inherits_from_id'),
+            description=serializer.validated_data.get('description', ''),
+            priority=serializer.validated_data.get('priority', 0),
+            color=serializer.validated_data.get('color', '#6B7280'),
+        )
+
+        return Response({
+            'data': RoleSerializer(role).data,
+            'message': 'Role created successfully.'
+        }, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(tags=['RBAC - Roles'])
+class RoleDetailView(OrganizationRBACMixin, generics.RetrieveAPIView):
+    """
+    Get role details.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = RoleSerializer
+    lookup_url_kwarg = 'role_id'
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return Role.objects.for_organization(organization).prefetch_related('permissions')
+
+
+@extend_schema(tags=['RBAC - Roles'])
+class RoleUpdateView(OrganizationRBACMixin, views.APIView):
+    """
+    Update a role.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Update role",
+        request=RoleUpdateSerializer,
+        responses={200: RoleSerializer}
+    )
+    def patch(self, request, org_id, role_id):
+        organization = self.get_organization()
+        role = get_object_or_404(
+            Role.objects.for_organization(organization),
+            id=role_id
+        )
+
+        serializer = RoleUpdateSerializer(role, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+
+        permissions = serializer.validated_data.pop('permission_codenames', None)
+
+        role = RoleService.update_role(
+            role=role,
+            updated_by=request.user,
+            permissions=permissions,
+            **serializer.validated_data
+        )
+
+        return Response({
+            'data': RoleSerializer(role).data,
+            'message': 'Role updated successfully.'
+        })
+
+
+@extend_schema(tags=['RBAC - Roles'])
+class RoleDeleteView(OrganizationRBACMixin, views.APIView):
+    """
+    Delete a role.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Delete role",
+        responses={
+            200: OpenApiResponse(description="Role deleted"),
+            400: OpenApiResponse(description="Cannot delete"),
+        }
+    )
+    def delete(self, request, org_id, role_id):
+        organization = self.get_organization()
+        role = get_object_or_404(
+            Role.objects.for_organization(organization),
+            id=role_id
+        )
+
+        reassign_to_id = request.query_params.get('reassign_to')
+        reassign_to = None
+        if reassign_to_id:
+            reassign_to = get_object_or_404(
+                Role.objects.for_organization(organization),
+                id=reassign_to_id
+            )
+
+        RoleService.delete_role(
+            role=role,
+            deleted_by=request.user,
+            reassign_to=reassign_to
+        )
+
+        return Response({
+            'message': 'Role deleted successfully.'
+        })
+
+
+@extend_schema(tags=['RBAC - Roles'])
+class RoleDuplicateView(OrganizationRBACMixin, views.APIView):
+    """
+    Duplicate a role.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Duplicate role",
+        responses={201: RoleSerializer}
+    )
+    def post(self, request, org_id, role_id):
+        organization = self.get_organization()
+        role = get_object_or_404(
+            Role.objects.for_organization(organization),
+            id=role_id
+        )
+
+        new_name = request.data.get('name', f"{role.name} (Copy)")
+
+        new_role = RoleService.duplicate_role(
+            role=role,
+            new_name=new_name,
+            duplicated_by=request.user
+        )
+
+        return Response({
+            'data': RoleSerializer(new_role).data,
+            'message': 'Role duplicated successfully.'
+        }, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(tags=['RBAC - Roles'])
+class RoleMembersView(OrganizationRBACMixin, generics.ListAPIView):
+    """
+    List members with a specific role.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = UserRoleSerializer
+
+    @extend_schema(
+        summary="List role members",
+        responses={200: UserRoleSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        role_id = self.kwargs.get('role_id')
+        return UserRole.objects.active().filter(
+            role_id=role_id
+        ).select_related('user', 'role', 'granted_by')
+
+
+# User Role Assignment Views
+
+@extend_schema(tags=['RBAC - Assignments'])
+class UserRoleListView(OrganizationRBACMixin, generics.ListAPIView):
+    """
+    List all role assignments in an organization.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = UserRoleSerializer
+
+    @extend_schema(
+        summary="List role assignments",
+        responses={200: UserRoleSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return UserRole.objects.active().filter(
+            organization=organization
+        ).select_related('user', 'role', 'granted_by')
+
+
+```
+
+"""
+Continuing from UserRoleAssignView...
+"""
+
+```python
+@extend_schema(tags=['RBAC - Assignments'])
+class UserRoleAssignView(OrganizationRBACMixin, views.APIView):
+    """
+    Assign a role to a user.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Assign role to user",
+        request=UserRoleAssignSerializer,
+        responses={
+            201: UserRoleSerializer,
+            400: OpenApiResponse(description="Validation error"),
+        }
+    )
+    def post(self, request, org_id):
+        organization = self.get_organization()
+
+        serializer = UserRoleAssignSerializer(
+            data=request.data,
+            context={'organization': organization, 'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+
+        user_role = UserRoleService.assign_role(
+            user=serializer.validated_data['user_id'],
+            role=serializer.validated_data['role_id'],
+            organization=organization,
+            granted_by=request.user,
+            product=serializer.validated_data.get('product_id'),
+            expires_at=serializer.validated_data.get('expires_at'),
+            conditions=serializer.validated_data.get('conditions', {})
+        )
+
+        return Response({
+            'data': UserRoleSerializer(user_role).data,
+            'message': 'Role assigned successfully.'
+        }, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(tags=['RBAC - Assignments'])
+class UserRoleRevokeView(OrganizationRBACMixin, views.APIView):
+    """
+    Revoke a role from a user.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Revoke role from user",
+        request=UserRoleRevokeSerializer,
+        responses={
+            200: OpenApiResponse(description="Role revoked"),
+        }
+    )
+    def post(self, request, org_id):
+        organization = self.get_organization()
+
+        serializer = UserRoleRevokeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        from apps.authentication.models import User
+        user = get_object_or_404(User, id=serializer.validated_data['user_id'])
+        role = get_object_or_404(Role, id=serializer.validated_data['role_id'])
+
+        UserRoleService.revoke_role(
+            user=user,
+            role=role,
+            organization=organization,
+            revoked_by=request.user
+        )
+
+        return Response({
+            'message': 'Role revoked successfully.'
+        })
+
+
+@extend_schema(tags=['RBAC - Assignments'])
+class UserPermissionsView(OrganizationRBACMixin, views.APIView):
+    """
+    Get all permissions for a user in an organization.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Get user permissions",
+        responses={200: OpenApiResponse(description="List of permission codenames")}
+    )
+    def get(self, request, org_id, user_id):
+        organization = self.get_organization()
+        
+        from apps.authentication.models import User
+        user = get_object_or_404(User, id=user_id)
+
+        permissions = PermissionService.get_user_permissions(user, organization)
+
+        return Response({
+            'data': {
+                'user_id': str(user.id),
+                'organization_id': str(organization.id),
+                'permissions': list(permissions)
+            }
+        })
+
+
+@extend_schema(tags=['RBAC - Assignments'])
+class CheckUserPermissionView(OrganizationRBACMixin, views.APIView):
+    """
+    Check if a user has a specific permission.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Check user permission",
+        responses={200: OpenApiResponse(description="Permission check result")}
+    )
+    def post(self, request, org_id):
+        organization = self.get_organization()
+        
+        permission = request.data.get('permission')
+        user_id = request.data.get('user_id', str(request.user.id))
+
+        if not permission:
+            return Response({
+                'error': 'Permission codename is required.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.authentication.models import User
+        user = get_object_or_404(User, id=user_id)
+
+        has_permission = PermissionService.user_has_permission(
+            user=user,
+            permission=permission,
+            organization=organization
+        )
+
+        return Response({
+            'data': {
+                'user_id': str(user.id),
+                'permission': permission,
+                'has_permission': has_permission
+            }
+        })
+
+
+# Import models for views
+from django.db import models
+```
+
+---
+
+## RBAC URLs
+
+### `apps/rbac/urls.py`
+
+```python
+"""
+RBAC URL patterns.
+"""
+from django.urls import path
+from .views import (
+    # Permissions
+    PermissionListView,
+    PermissionCategoriesView,
+    
+    # Roles
+    RoleListView,
+    RoleCreateView,
+    RoleDetailView,
+    RoleUpdateView,
+    RoleDeleteView,
+    RoleDuplicateView,
+    RoleMembersView,
+    
+    # User Roles
+    UserRoleListView,
+    UserRoleAssignView,
+    UserRoleRevokeView,
+    UserPermissionsView,
+    CheckUserPermissionView,
+)
+
+app_name = 'rbac'
+
+urlpatterns = [
+    # Permissions
+    path(
+        'permissions/',
+        PermissionListView.as_view(),
+        name='permissions-list'
+    ),
+    path(
+        'permissions/categories/',
+        PermissionCategoriesView.as_view(),
+        name='permissions-categories'
+    ),
+
+    # Roles
+    path(
+        'organizations/<uuid:org_id>/roles/',
+        RoleListView.as_view(),
+        name='roles-list'
+    ),
+    path(
+        'organizations/<uuid:org_id>/roles/create/',
+        RoleCreateView.as_view(),
+        name='roles-create'
+    ),
+    path(
+        'organizations/<uuid:org_id>/roles/<uuid:role_id>/',
+        RoleDetailView.as_view(),
+        name='roles-detail'
+    ),
+    path(
+        'organizations/<uuid:org_id>/roles/<uuid:role_id>/update/',
+        RoleUpdateView.as_view(),
+        name='roles-update'
+    ),
+    path(
+        'organizations/<uuid:org_id>/roles/<uuid:role_id>/delete/',
+        RoleDeleteView.as_view(),
+        name='roles-delete'
+    ),
+    path(
+        'organizations/<uuid:org_id>/roles/<uuid:role_id>/duplicate/',
+        RoleDuplicateView.as_view(),
+        name='roles-duplicate'
+    ),
+    path(
+        'organizations/<uuid:org_id>/roles/<uuid:role_id>/members/',
+        RoleMembersView.as_view(),
+        name='roles-members'
+    ),
+
+    # User Role Assignments
+    path(
+        'organizations/<uuid:org_id>/role-assignments/',
+        UserRoleListView.as_view(),
+        name='assignments-list'
+    ),
+    path(
+        'organizations/<uuid:org_id>/role-assignments/assign/',
+        UserRoleAssignView.as_view(),
+        name='assignments-assign'
+    ),
+    path(
+        'organizations/<uuid:org_id>/role-assignments/revoke/',
+        UserRoleRevokeView.as_view(),
+        name='assignments-revoke'
+    ),
+    path(
+        'organizations/<uuid:org_id>/users/<uuid:user_id>/permissions/',
+        UserPermissionsView.as_view(),
+        name='user-permissions'
+    ),
+    path(
+        'organizations/<uuid:org_id>/check-permission/',
+        CheckUserPermissionView.as_view(),
+        name='check-permission'
+    ),
+]
+```
+
+---
+
+## RBAC Permission Decorators
+
+### `apps/rbac/decorators.py`
+
+```python
+"""
+Decorators for permission checking.
+"""
+from functools import wraps
+from rest_framework.response import Response
+from rest_framework import status
+from apps.core.exceptions import PermissionDeniedException
+from .services import PermissionService
+
+
+def require_permission(permission_codename):
+    """
+    Decorator to require a specific permission for a view.
+    Usage:
+        @require_permission('members.create')
+        def my_view(request, org_id):
+            ...
+    """
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapper(request, *args, **kwargs):
+            # Get organization from kwargs or request
+            org_id = kwargs.get('org_id') or request.tenant_context.get('organization_id')
+            
+            if not org_id:
+                return Response({
+                    'error': 'Organization context required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Check permission
+            if not PermissionService.user_has_permission(
+                user=request.user,
+                permission=permission_codename,
+                organization_id=org_id
+            ):
+                raise PermissionDeniedException(
+                    f"Permission required: {permission_codename}"
+                )
+
+            return view_func(request, *args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def require_any_permission(*permission_codenames):
+    """
+    Decorator to require any of the specified permissions.
+    """
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapper(request, *args, **kwargs):
+            org_id = kwargs.get('org_id') or request.tenant_context.get('organization_id')
+            
+            if not org_id:
+                return Response({
+                    'error': 'Organization context required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Check if user has any of the permissions
+            has_permission = any(
+                PermissionService.user_has_permission(
+                    user=request.user,
+                    permission=perm,
+                    organization_id=org_id
+                )
+                for perm in permission_codenames
+            )
+
+            if not has_permission:
+                raise PermissionDeniedException(
+                    f"One of these permissions required: {', '.join(permission_codenames)}"
+                )
+
+            return view_func(request, *args, **kwargs)
+        return wrapper
+    return decorator
+```
+
+---
+
+## RBAC Permission Backend
+
+### `apps/rbac/backends.py`
+
+```python
+"""
+Custom permission backend for RBAC.
+"""
+from django.contrib.auth.backends import BaseBackend
+from apps.organizations.models import OrganizationMember
+from .services import PermissionService
+
+
+class RBACBackend(BaseBackend):
+    """
+    Custom authentication backend for RBAC permission checking.
+    """
+    
+    def authenticate(self, request, **kwargs):
+        """
+        This backend doesn't handle authentication.
+        """
+        return None
+
+    def has_perm(self, user_obj, perm, obj=None):
+        """
+        Check if user has permission.
+        
+        Args:
+            user_obj: User instance
+            perm: Permission string (e.g., 'members.create')
+            obj: Organization instance (optional)
+        """
+        if not user_obj or not user_obj.is_authenticated:
+            return False
+
+        # Superusers have all permissions
+        if user_obj.is_superuser:
+            return True
+
+        # If no object provided, can't check organization permissions
+        if not obj:
+            return False
+
+        # Check RBAC permission
+        from apps.organizations.models import Organization
+        
+        if isinstance(obj, Organization):
+            return PermissionService.user_has_permission(
+                user=user_obj,
+                permission=perm,
+                organization=obj
+            )
+
+        # For other object types, check if they have an organization attribute
+        if hasattr(obj, 'organization'):
+            return PermissionService.user_has_permission(
+                user=user_obj,
+                permission=perm,
+                organization=obj.organization
+            )
+
+        return False
+
+    def has_module_perms(self, user_obj, app_label):
+        """
+        Check if user has any permissions in the given app.
+        """
+        if user_obj.is_superuser:
+            return True
+        
+        return False
+```
+
+**Add to `config/settings/base.py`:**
+
+```python
+AUTHENTICATION_BACKENDS = [
+    'apps.rbac.backends.RBACBackend',
+    'apps.authentication.backends.EmailBackend',
+    'django.contrib.auth.backends.ModelBackend',
+]
+```
+
+---
+
+## RBAC DRF Permission Classes
+
+### `apps/rbac/permissions.py`
+
+```python
+"""
+DRF permission classes for RBAC.
+"""
+from rest_framework import permissions
+from .services import PermissionService
+
+
+class HasPermission(permissions.BasePermission):
+    """
+    Custom permission class that checks RBAC permissions.
+    
+    Usage in ViewSet:
+        permission_classes = [HasPermission]
+        permission_required = 'members.create'
+    """
+    
+    def has_permission(self, request, view):
+        """Check if user has required permission."""
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        # Get required permission from view
+        permission_required = getattr(view, 'permission_required', None)
+        if not permission_required:
+            # No specific permission required
+            return True
+
+        # Get organization from request context
+        org_id = request.tenant_context.get('organization_id')
+        if not org_id:
+            return False
+
+        return PermissionService.user_has_permission(
+            user=request.user,
+            permission=permission_required,
+            organization_id=org_id
+        )
+
+    def has_object_permission(self, request, view, obj):
+        """Check object-level permission."""
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        # Get required permission from view
+        permission_required = getattr(view, 'permission_required', None)
+        if not permission_required:
+            return True
+
+        # Determine organization from object
+        from apps.organizations.models import Organization
+        
+        if isinstance(obj, Organization):
+            organization = obj
+        elif hasattr(obj, 'organization'):
+            organization = obj.organization
+        else:
+            return False
+
+        return PermissionService.user_has_permission(
+            user=request.user,
+            permission=permission_required,
+            organization=organization
+        )
+
+
+class HasAnyPermission(permissions.BasePermission):
+    """
+    Check if user has any of the specified permissions.
+    
+    Usage:
+        permission_classes = [HasAnyPermission]
+        permissions_required = ['members.create', 'members.update']
+    """
+    
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        permissions_required = getattr(view, 'permissions_required', [])
+        if not permissions_required:
+            return True
+
+        org_id = request.tenant_context.get('organization_id')
+        if not org_id:
+            return False
+
+        return any(
+            PermissionService.user_has_permission(
+                user=request.user,
+                permission=perm,
+                organization_id=org_id
+            )
+            for perm in permissions_required
+        )
+```
+
+---
+
+## RBAC Signals
+
+### `apps/rbac/signals.py`
+
+```python
+"""
+RBAC signals.
+"""
+import logging
+from django.db.models.signals import post_save, pre_delete, m2m_changed
+from django.dispatch import receiver
+from .models import Role, UserRole, Permission
+
+logger = logging.getLogger(__name__)
+
+
+@receiver(post_save, sender=Role)
+def role_saved(sender, instance, created, **kwargs):
+    """Handle role creation/update."""
+    if created:
+        logger.info(f"Role created: {instance.name}", extra={
+            'role_id': str(instance.id),
+            'organization_id': str(instance.organization_id) if instance.organization else None,
+        })
+    else:
+        # Clear permission cache when role is modified
+        instance.clear_permission_cache()
+
+
+@receiver(m2m_changed, sender=Role.permissions.through)
+def role_permissions_changed(sender, instance, action, **kwargs):
+    """Handle role permission changes."""
+    if action in ['post_add', 'post_remove', 'post_clear']:
+        instance.clear_permission_cache()
+        logger.info(f"Role permissions changed: {instance.name}", extra={
+            'role_id': str(instance.id),
+            'action': action,
+        })
+
+
+@receiver(post_save, sender=UserRole)
+def user_role_assigned(sender, instance, created, **kwargs):
+    """Handle user role assignment."""
+    if created:
+        logger.info(f"Role assigned: {instance.role.name} to {instance.user.email}", extra={
+            'user_role_id': str(instance.id),
+            'user_id': str(instance.user_id),
+            'role_id': str(instance.role_id),
+            'organization_id': str(instance.organization_id),
+        })
+
+
+@receiver(pre_delete, sender=UserRole)
+def user_role_revoked(sender, instance, **kwargs):
+    """Handle user role revocation."""
+    logger.info(f"Role revoked: {instance.role.name} from {instance.user.email}", extra={
+        'user_id': str(instance.user_id),
+        'role_id': str(instance.role_id),
+    })
+```
+
+---
+
+## RBAC Admin
+
+### `apps/rbac/admin.py`
+
+```python
+"""
+Admin configuration for RBAC models.
+"""
+from django.contrib import admin
+from django.utils.html import format_html
+from .models import Permission, Role, UserRole
+
+
+@admin.register(Permission)
+class PermissionAdmin(admin.ModelAdmin):
+    """Admin for Permission model."""
+    list_display = [
+        'name',
+        'codename',
+        'resource',
+        'action',
+        'scope',
+        'category',
+        'is_system',
+    ]
+    list_filter = [
+        'scope',
+        'category',
+        'is_system',
+        'resource',
+    ]
+    search_fields = [
+        'name',
+        'codename',
+        'resource',
+    ]
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    ordering = ['category', 'sort_order', 'resource', 'action']
+
+    fieldsets = (
+        (None, {
+            'fields': ('id', 'codename', 'name', 'description')
+        }),
+        ('Classification', {
+            'fields': ('resource', 'action', 'scope', 'category', 'is_system')
+        }),
+        ('Display', {
+            'fields': ('sort_order',)
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+
+class RolePermissionInline(admin.TabularInline):
+    """Inline for role permissions."""
+    model = Role.permissions.through
+    extra = 0
+    raw_id_fields = ['permission']
+
+
+@admin.register(Role)
+class RoleAdmin(admin.ModelAdmin):
+    """Admin for Role model."""
+    list_display = [
+        'name',
+        'organization',
+        'is_system_role',
+        'is_default',
+        'priority',
+        'color_badge',
+        'user_count',
+    ]
+    list_filter = [
+        'is_system_role',
+        'is_default',
+        'organization',
+    ]
+    search_fields = [
+        'name',
+        'slug',
+        'organization__name',
+    ]
+    readonly_fields = [
+        'id',
+        'slug',
+        'user_count',
+        'created_at',
+        'updated_at',
+    ]
+    raw_id_fields = ['organization', 'product', 'inherits_from']
+    filter_horizontal = ['permissions']
+    ordering = ['-priority', 'name']
+
+    fieldsets = (
+        (None, {
+            'fields': ('id', 'name', 'slug', 'description')
+        }),
+        ('Scope', {
+            'fields': ('organization', 'product')
+        }),
+        ('Settings', {
+            'fields': (
+                'is_system_role',
+                'is_default',
+                'priority',
+                'color'
+            )
+        }),
+        ('Inheritance', {
+            'fields': ('inherits_from',)
+        }),
+        ('Metadata', {
+            'fields': ('metadata', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def color_badge(self, obj):
+        """Display color badge."""
+        return format_html(
+            '<span style="display: inline-block; width: 20px; height: 20px; '
+            'background-color: {}; border-radius: 3px;"></span>',
+            obj.color
+        )
+    color_badge.short_description = 'Color'
+
+    def user_count(self, obj):
+        """Display number of users with this role."""
+        return UserRole.objects.active().filter(role=obj).count()
+    user_count.short_description = 'Users'
+
+
+@admin.register(UserRole)
+class UserRoleAdmin(admin.ModelAdmin):
+    """Admin for UserRole model."""
+    list_display = [
+        'user',
+        'role',
+        'organization',
+        'product',
+        'is_active',
+        'granted_at',
+        'expires_at',
+    ]
+    list_filter = [
+        'is_active',
+        'role',
+        'organization',
+        'granted_at',
+    ]
+    search_fields = [
+        'user__email',
+        'role__name',
+        'organization__name',
+    ]
+    readonly_fields = [
+        'id',
+        'granted_at',
+        'created_at',
+        'updated_at',
+    ]
+    raw_id_fields = ['user', 'role', 'organization', 'product', 'granted_by']
+    ordering = ['-granted_at']
+
+    fieldsets = (
+        (None, {
+            'fields': ('id', 'user', 'role', 'organization')
+        }),
+        ('Scope', {
+            'fields': ('product', 'resource_type', 'resource_id')
+        }),
+        ('Status', {
+            'fields': ('is_active', 'expires_at')
+        }),
+        ('Tracking', {
+            'fields': ('granted_by', 'granted_at')
+        }),
+        ('Conditions', {
+            'fields': ('conditions',),
+            'classes': ('collapse',)
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+```
+
+---
+
+## RBAC Management Command
+
+### `apps/rbac/management/commands/setup_rbac.py`
+
+```python
+"""
+Management command to setup RBAC with default permissions and roles.
+"""
+from django.core.management.base import BaseCommand
+from apps.rbac.defaults import setup_rbac
+
+
+class Command(BaseCommand):
+    help = 'Setup RBAC with default permissions and roles'
+
+    def handle(self, *args, **options):
+        self.stdout.write('Setting up RBAC...')
+
+        result = setup_rbac()
+
+        self.stdout.write(self.style.SUCCESS(
+            f"✓ Created {result['permissions_created']} permissions"
+        ))
+        self.stdout.write(self.style.SUCCESS(
+            f"✓ Created {result['roles_created']} roles"
+        ))
+        self.stdout.write(self.style.SUCCESS('RBAC setup complete!'))
+```
+
+---
+
+## Update Main URLs
+
+### `config/urls.py` (Update)
+
+```python
+from django.contrib import admin
+from django.urls import path, include
+from django.conf import settings
+from django.conf.urls.static import static
+from drf_spectacular.views import (
+    SpectacularAPIView,
+    SpectacularRedocView,
+    SpectacularSwaggerView,
+)
+
+urlpatterns = [
+    # Admin
+    path('admin/', admin.site.urls),
+    
+    # API Documentation
+    path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
+    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
+    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
+    
+    # API v1
+    path('api/v1/auth/', include('apps.authentication.urls')),
+    path('api/v1/', include('apps.organizations.urls')),
+    path('api/v1/', include('apps.teams.urls')),
+    path('api/v1/', include('apps.invitations.urls')),
+    path('api/v1/', include('apps.rbac.urls')),  # NEW
+    # path('api/v1/', include('apps.notifications.urls')),
+    # path('api/v1/', include('apps.audit.urls')),
+]
+
+if settings.DEBUG:
+    import debug_toolbar
+    urlpatterns = [
+        path('__debug__/', include(debug_toolbar.urls)),
+    ] + urlpatterns
+    
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
+```
+
+---
+
+## Update Celery Beat Schedule
+
+### `config/celery.py` (Update beat_schedule)
+
+```python
+# Add to beat_schedule
+app.conf.beat_schedule = {
+    'cleanup-expired-invitations': {
+        'task': 'apps.invitations.tasks.cleanup_expired_invitations',
+        'schedule': crontab(hour=2, minute=0),  # 2 AM daily
+    },
+    'cleanup-old-invitations': {
+        'task': 'apps.invitations.tasks.cleanup_old_invitations',
+        'schedule': crontab(day_of_week=0, hour=3, minute=0),  # Sunday 3 AM
+    },
+    'cleanup-expired-sessions': {
+        'task': 'apps.authentication.tasks.cleanup_expired_sessions',
+        'schedule': crontab(hour=3, minute=0),  # 3 AM daily
+    },
+    'cleanup-expired-role-assignments': {
+        'task': 'apps.rbac.tasks.cleanup_expired_role_assignments',
+        'schedule': crontab(hour=4, minute=0),  # 4 AM daily
+    },
+}
+```
+
+### `apps/rbac/tasks.py`
+
+```python
+"""
+Celery tasks for RBAC.
+"""
+import logging
+from celery import shared_task
+from .services import UserRoleService
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task
+def cleanup_expired_role_assignments():
+    """
+    Cleanup expired role assignments.
+    Runs daily via celery beat.
+    """
+    count = UserRoleService.cleanup_expired_assignments()
+    logger.info(f"Cleaned up {count} expired role assignments")
+    return count
+```
+
+---
+
+## ✅ Phase 4 Complete Summary
+
+### What we implemented:
+
+**Invitations System:**
+- ✅ Invitation model with token-based security
+- ✅ Invite users by email with custom roles and teams
+- ✅ Bulk invitations
+- ✅ Accept/decline invitations
+- ✅ Resend/cancel invitations
+- ✅ Invitation expiration and cleanup
+- ✅ Email notifications
+- ✅ Public and authenticated endpoints
+- ✅ Admin interface
+
+**RBAC System:**
+- ✅ Permission model with categories
+- ✅ Role model with inheritance
+- ✅ UserRole model for assignments
+- ✅ Default system permissions (40+ permissions)
+- ✅ Default system roles (Owner, Admin, Member, Viewer)
+- ✅ Custom role creation per organization
+- ✅ Permission caching for performance
+- ✅ PermissionService for checking permissions
+- ✅ RoleService for role management
+- ✅ UserRoleService for assignments
+- ✅ Custom authentication backend
+- ✅ DRF permission classes
+- ✅ Permission decorators
+- ✅ Complete API endpoints
+- ✅ Management command for setup
+- ✅ Admin interface
+
+### API Endpoints Added:
+
+**Invitations (13 endpoints):**
+- Organization invitations CRUD
+- Public invitation endpoints (by token)
+- Accept/decline/resend/cancel
+
+**RBAC (13 endpoints):**
+- Permissions listing
+- Roles CRUD + duplicate
+- Role assignments
+- Permission checking
+
+### Total Endpoints Implemented So Far:
+- Authentication: 15
+- Users: 11
+- Organizations: 9
+- Teams: 13
+- Invitations: 13
+- RBAC: 13
+

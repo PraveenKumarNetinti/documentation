@@ -1,0 +1,2773 @@
+---
+title: 'Teams Module'
+description: 'Now I'll build the complete **Teams module** with models, serializers, services, views, and admin.'
+sidebarTitle: "Teams Module"
+---
+
+## Teams App
+
+To avoid exceeding the token limit, let me introduce the **Teams App Structure** (and then implement it in next phase).
+
+### Teams App Structure
+
+```
+apps/teams/
+├── __init__.py
+├── apps.py
+├── models.py          # Team, TeamMember
+├── serializers.py     # Team serializers
+├── views.py           # API views
+├── urls.py            # Endpoints
+├── services.py        # Logic: create, manage members
+├── admin.py
+```
+
+---
+
+## Teams App Configuration
+
+### `apps/teams/__init__.py`
+
+```python
+default_app_config = 'apps.teams.apps.TeamsConfig'
+```
+
+### `apps/teams/apps.py`
+
+```python
+from django.apps import AppConfig
+
+
+class TeamsConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.teams'
+    verbose_name = 'Teams'
+
+    def ready(self):
+        """Import signals when app is ready."""
+        import apps.teams.signals  # noqa
+```
+
+---
+
+## Teams Models
+
+### `apps/teams/models.py`
+
+```python
+"""
+Team models for organizing users within organizations.
+"""
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+from django.utils.text import slugify
+from apps.core.models import BaseModel
+from apps.core.mixins import StatusMixin, MetadataMixin
+from apps.organizations.models import Organization
+from apps.authentication.models import User
+from .managers import TeamManager, TeamMemberManager
+
+
+class Team(BaseModel, StatusMixin, MetadataMixin):
+    """
+    Team model for grouping users within an organization.
+    Supports hierarchical team structures.
+    """
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('inactive', 'Inactive'),
+        ('archived', 'Archived'),
+    ]
+
+    VISIBILITY_CHOICES = [
+        ('public', 'Public'),      # Visible to all org members
+        ('private', 'Private'),    # Visible only to team members
+        ('secret', 'Secret'),      # Hidden from non-members
+    ]
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='teams',
+        help_text=_('Organization this team belongs to')
+    )
+    name = models.CharField(
+        _('team name'),
+        max_length=255
+    )
+    slug = models.SlugField(
+        _('slug'),
+        max_length=255,
+        help_text=_('URL-safe identifier for the team')
+    )
+    description = models.TextField(
+        _('description'),
+        blank=True,
+        help_text=_('Brief description of the team')
+    )
+
+    # Hierarchy
+    parent_team = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='child_teams',
+        help_text=_('Parent team for hierarchy')
+    )
+
+    # Visibility & Access
+    visibility = models.CharField(
+        max_length=20,
+        choices=VISIBILITY_CHOICES,
+        default='public'
+    )
+
+    # Status
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='active',
+        db_index=True
+    )
+
+    # Team Lead
+    lead = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='led_teams',
+        help_text=_('Team lead/manager')
+    )
+
+    # Appearance
+    color = models.CharField(
+        max_length=7,
+        default='#3B82F6',
+        help_text=_('Team color in hex format')
+    )
+    icon = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text=_('Icon identifier for the team')
+    )
+    avatar_url = models.URLField(
+        _('avatar URL'),
+        max_length=500,
+        blank=True
+    )
+
+    # Settings
+    settings = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_('Team-specific settings')
+    )
+
+    # Permissions (team-level permissions that apply to all members)
+    team_permissions = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=_('Permissions granted to team members')
+    )
+
+    objects = TeamManager()
+
+    class Meta:
+        db_table = 'teams'
+        verbose_name = _('team')
+        verbose_name_plural = _('teams')
+        unique_together = [['organization', 'slug']]
+        indexes = [
+            models.Index(fields=['organization', 'status']),
+            models.Index(fields=['organization', 'slug']),
+            models.Index(fields=['parent_team']),
+        ]
+        ordering = ['name']
+
+    def __str__(self):
+        return f"{self.name} ({self.organization.name})"
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = self.generate_unique_slug()
+        super().save(*args, **kwargs)
+
+    def generate_unique_slug(self):
+        """Generate unique slug within organization."""
+        base_slug = slugify(self.name)
+        slug = base_slug
+        counter = 1
+
+        while Team.objects.filter(
+            organization=self.organization,
+            slug=slug
+        ).exclude(id=self.id).exists():
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+
+        return slug
+
+    @property
+    def member_count(self):
+        """Get current member count."""
+        return self.members.filter(status='active').count()
+
+    @property
+    def ancestors(self):
+        """Get all ancestor teams (parent chain)."""
+        ancestors = []
+        current = self.parent_team
+        while current:
+            ancestors.append(current)
+            current = current.parent_team
+        return ancestors
+
+    @property
+    def descendants(self):
+        """Get all descendant teams."""
+        descendants = []
+        children = list(self.child_teams.all())
+        while children:
+            child = children.pop(0)
+            descendants.append(child)
+            children.extend(list(child.child_teams.all()))
+        return descendants
+
+    @property
+    def depth(self):
+        """Get the depth of this team in the hierarchy."""
+        return len(self.ancestors)
+
+    def is_ancestor_of(self, team):
+        """Check if this team is an ancestor of another team."""
+        return self in team.ancestors
+
+    def is_descendant_of(self, team):
+        """Check if this team is a descendant of another team."""
+        return self in team.descendants
+
+    def get_all_members(self, include_descendants=False):
+        """
+        Get all team members.
+        Optionally include members from descendant teams.
+        """
+        members = set(self.members.filter(status='active').values_list('user_id', flat=True))
+
+        if include_descendants:
+            for descendant in self.descendants:
+                members.update(
+                    descendant.members.filter(status='active').values_list('user_id', flat=True)
+                )
+
+        return User.objects.filter(id__in=members)
+
+
+class TeamMember(BaseModel, StatusMixin):
+    """
+    Membership relation between User and Team.
+    """
+    ROLE_CHOICES = [
+        ('lead', 'Lead'),
+        ('member', 'Member'),
+        ('viewer', 'Viewer'),
+    ]
+
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('invited', 'Invited'),
+        ('suspended', 'Suspended'),
+        ('removed', 'Removed'),
+    ]
+
+    team = models.ForeignKey(
+        Team,
+        on_delete=models.CASCADE,
+        related_name='members'
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='team_memberships'
+    )
+    role = models.CharField(
+        max_length=20,
+        choices=ROLE_CHOICES,
+        default='member',
+        db_index=True
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='active',
+        db_index=True
+    )
+
+    # Tracking
+    joined_at = models.DateTimeField(auto_now_add=True)
+    added_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='team_members_added'
+    )
+
+    # Custom team-specific permissions for this member
+    custom_permissions = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=_('Additional permissions for this member in this team')
+    )
+
+    # Notes about this membership
+    notes = models.TextField(
+        blank=True,
+        help_text=_('Internal notes about this team member')
+    )
+
+    objects = TeamMemberManager()
+
+    class Meta:
+        db_table = 'team_members'
+        verbose_name = _('team member')
+        verbose_name_plural = _('team members')
+        unique_together = [['team', 'user']]
+        indexes = [
+            models.Index(fields=['team', 'status']),
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['role']),
+        ]
+        ordering = ['-joined_at']
+
+    def __str__(self):
+        return f"{self.user.email} - {self.team.name} ({self.role})"
+
+    @property
+    def is_lead(self):
+        return self.role == 'lead'
+
+    @property
+    def can_manage_members(self):
+        return self.role == 'lead'
+
+    @property
+    def organization(self):
+        return self.team.organization
+```
+
+---
+
+## Teams Managers
+
+### `apps/teams/managers.py`
+
+```python
+"""
+Custom managers for Team models.
+"""
+from django.db import models
+from django.db.models import Q, Count, Prefetch
+
+
+class TeamQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for Team model.
+    """
+    def active(self):
+        """Return only active teams."""
+        return self.filter(status='active')
+
+    def for_organization(self, organization):
+        """Filter by organization."""
+        return self.filter(organization=organization)
+
+    def visible_to_user(self, user, organization):
+        """
+        Return teams visible to a user.
+        - All public teams
+        - Private teams where user is a member
+        - Secret teams where user is a member
+        """
+        return self.filter(
+            Q(organization=organization) & (
+                Q(visibility='public') |
+                Q(members__user=user, members__status='active')
+            )
+        ).distinct()
+
+    def root_teams(self):
+        """Return only root teams (no parent)."""
+        return self.filter(parent_team__isnull=True)
+
+    def with_member_count(self):
+        """Annotate with member count."""
+        return self.annotate(
+            total_members=Count('members', filter=Q(members__status='active'))
+        )
+
+    def prefetch_members(self):
+        """Prefetch team members."""
+        return self.prefetch_related(
+            Prefetch(
+                'members',
+                queryset=TeamMember.objects.filter(status='active').select_related('user')
+            )
+        )
+
+    def with_lead(self):
+        """Select related team lead."""
+        return self.select_related('lead')
+
+
+class TeamManager(models.Manager):
+    """
+    Custom manager for Team model.
+    """
+    def get_queryset(self):
+        return TeamQuerySet(self.model, using=self._db)
+
+    def active(self):
+        return self.get_queryset().active()
+
+    def for_organization(self, organization):
+        return self.get_queryset().for_organization(organization)
+
+    def visible_to_user(self, user, organization):
+        return self.get_queryset().visible_to_user(user, organization)
+
+    def root_teams(self):
+        return self.get_queryset().root_teams()
+
+    def create_team(self, organization, name, created_by, **kwargs):
+        """
+        Create a team and add creator as lead.
+        """
+        from django.db import transaction
+
+        with transaction.atomic():
+            team = self.create(
+                organization=organization,
+                name=name,
+                lead=created_by,
+                **kwargs
+            )
+
+            # Add creator as team lead
+            TeamMember.objects.create(
+                team=team,
+                user=created_by,
+                role='lead',
+                status='active',
+                added_by=created_by
+            )
+
+            return team
+
+
+class TeamMemberQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for TeamMember model.
+    """
+    def active(self):
+        """Return only active members."""
+        return self.filter(status='active')
+
+    def leads(self):
+        """Return only team leads."""
+        return self.filter(role='lead')
+
+    def for_team(self, team):
+        """Filter by team."""
+        return self.filter(team=team)
+
+    def for_user(self, user):
+        """Filter by user."""
+        return self.filter(user=user)
+
+    def with_user(self):
+        """Select related user."""
+        return self.select_related('user')
+
+    def with_team(self):
+        """Select related team."""
+        return self.select_related('team', 'team__organization')
+
+
+class TeamMemberManager(models.Manager):
+    """
+    Custom manager for TeamMember model.
+    """
+    def get_queryset(self):
+        return TeamMemberQuerySet(self.model, using=self._db)
+
+    def active(self):
+        return self.get_queryset().active()
+
+    def for_team(self, team):
+        return self.get_queryset().for_team(team)
+
+    def for_user(self, user):
+        return self.get_queryset().for_user(user)
+
+    def get_membership(self, team, user):
+        """Get membership for user in team."""
+        try:
+            return self.get(team=team, user=user, status='active')
+        except self.model.DoesNotExist:
+            return None
+
+    def is_member(self, team, user):
+        """Check if user is a member of team."""
+        return self.filter(team=team, user=user, status='active').exists()
+
+    def is_lead(self, team, user):
+        """Check if user is a lead of team."""
+        return self.filter(team=team, user=user, role='lead', status='active').exists()
+
+
+# Import TeamMember for the manager
+from apps.teams.models import TeamMember
+```
+
+**Note:** Due to circular import, update `apps/teams/models.py` to import managers properly:
+
+### Updated Import in `apps/teams/models.py` (top of file)
+
+```python
+# At the top, use lazy import pattern
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+from django.utils.text import slugify
+from apps.core.models import BaseModel
+from apps.core.mixins import StatusMixin, MetadataMixin
+
+
+# Lazy manager import - define managers after models
+def get_team_manager():
+    from .managers import TeamManager
+    return TeamManager()
+
+
+def get_team_member_manager():
+    from .managers import TeamMemberManager
+    return TeamMemberManager()
+```
+
+Actually, let's fix this properly by restructuring:
+
+### `apps/teams/managers.py` (Fixed)
+
+```python
+"""
+Custom managers for Team models.
+"""
+from django.db import models
+from django.db.models import Q, Count, Prefetch
+
+
+class TeamQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for Team model.
+    """
+    def active(self):
+        """Return only active teams."""
+        return self.filter(status='active')
+
+    def for_organization(self, organization):
+        """Filter by organization."""
+        return self.filter(organization=organization)
+
+    def visible_to_user(self, user, organization):
+        """
+        Return teams visible to a user.
+        """
+        return self.filter(
+            Q(organization=organization) & (
+                Q(visibility='public') |
+                Q(members__user=user, members__status='active')
+            )
+        ).distinct()
+
+    def root_teams(self):
+        """Return only root teams (no parent)."""
+        return self.filter(parent_team__isnull=True)
+
+    def with_member_count(self):
+        """Annotate with member count."""
+        return self.annotate(
+            total_members=Count('members', filter=Q(members__status='active'))
+        )
+
+    def prefetch_members(self):
+        """Prefetch team members."""
+        return self.prefetch_related('members', 'members__user')
+
+    def with_lead(self):
+        """Select related team lead."""
+        return self.select_related('lead')
+
+
+class TeamManager(models.Manager):
+    """
+    Custom manager for Team model.
+    """
+    def get_queryset(self):
+        return TeamQuerySet(self.model, using=self._db)
+
+    def active(self):
+        return self.get_queryset().active()
+
+    def for_organization(self, organization):
+        return self.get_queryset().for_organization(organization)
+
+    def visible_to_user(self, user, organization):
+        return self.get_queryset().visible_to_user(user, organization)
+
+    def root_teams(self):
+        return self.get_queryset().root_teams()
+
+
+class TeamMemberQuerySet(models.QuerySet):
+    """
+    Custom QuerySet for TeamMember model.
+    """
+    def active(self):
+        """Return only active members."""
+        return self.filter(status='active')
+
+    def leads(self):
+        """Return only team leads."""
+        return self.filter(role='lead')
+
+    def for_team(self, team):
+        """Filter by team."""
+        return self.filter(team=team)
+
+    def for_user(self, user):
+        """Filter by user."""
+        return self.filter(user=user)
+
+    def with_user(self):
+        """Select related user."""
+        return self.select_related('user')
+
+    def with_team(self):
+        """Select related team."""
+        return self.select_related('team', 'team__organization')
+
+
+class TeamMemberManager(models.Manager):
+    """
+    Custom manager for TeamMember model.
+    """
+    def get_queryset(self):
+        return TeamMemberQuerySet(self.model, using=self._db)
+
+    def active(self):
+        return self.get_queryset().active()
+
+    def for_team(self, team):
+        return self.get_queryset().for_team(team)
+
+    def for_user(self, user):
+        return self.get_queryset().for_user(user)
+
+    def get_membership(self, team, user):
+        """Get membership for user in team."""
+        try:
+            return self.get(team=team, user=user, status='active')
+        except self.model.DoesNotExist:
+            return None
+
+    def is_member(self, team, user):
+        """Check if user is a member of team."""
+        return self.filter(team=team, user=user, status='active').exists()
+
+    def is_lead(self, team, user):
+        """Check if user is a lead of team."""
+        return self.filter(team=team, user=user, role='lead', status='active').exists()
+```
+
+---
+
+## Teams Serializers
+
+### `apps/teams/serializers.py`
+
+```python
+"""
+Team serializers.
+"""
+from rest_framework import serializers
+from django.utils.translation import gettext_lazy as _
+from django.db import transaction
+
+from apps.authentication.serializers import UserSerializer
+from apps.authentication.models import User
+from apps.organizations.models import Organization, OrganizationMember
+from .models import Team, TeamMember
+
+
+class TeamMemberSerializer(serializers.ModelSerializer):
+    """
+    Serializer for TeamMember model.
+    """
+    user = UserSerializer(read_only=True)
+    user_id = serializers.UUIDField(write_only=True, required=False)
+    added_by = UserSerializer(read_only=True)
+
+    class Meta:
+        model = TeamMember
+        fields = [
+            'id',
+            'team',
+            'user',
+            'user_id',
+            'role',
+            'status',
+            'joined_at',
+            'added_by',
+            'is_lead',
+            'can_manage_members',
+            'notes',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id',
+            'team',
+            'user',
+            'joined_at',
+            'added_by',
+            'is_lead',
+            'can_manage_members',
+            'created_at',
+        ]
+
+
+class TeamMemberCreateSerializer(serializers.Serializer):
+    """
+    Serializer for adding members to a team.
+    """
+    user_id = serializers.UUIDField()
+    role = serializers.ChoiceField(
+        choices=TeamMember.ROLE_CHOICES,
+        default='member'
+    )
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_user_id(self, value):
+        """Validate user exists and is org member."""
+        try:
+            user = User.objects.get(id=value)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(_("User not found."))
+
+        team = self.context['team']
+
+        # Check if user is an organization member
+        if not OrganizationMember.objects.is_member(team.organization, user):
+            raise serializers.ValidationError(
+                _("User must be a member of the organization to join a team.")
+            )
+
+        # Check if already a team member
+        if TeamMember.objects.is_member(team, user):
+            raise serializers.ValidationError(
+                _("User is already a member of this team.")
+            )
+
+        return user
+
+
+class TeamMemberUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for updating team member.
+    """
+    class Meta:
+        model = TeamMember
+        fields = ['role', 'notes']
+
+    def validate_role(self, value):
+        """Validate role change."""
+        request = self.context['request']
+        instance = self.instance
+        team = instance.team
+
+        # Check if user can manage members
+        requester_membership = TeamMember.objects.get_membership(team, request.user)
+        if not requester_membership or not requester_membership.can_manage_members:
+            raise serializers.ValidationError(
+                _("You don't have permission to change member roles.")
+            )
+
+        return value
+
+
+class TeamMemberBulkAddSerializer(serializers.Serializer):
+    """
+    Serializer for bulk adding members to a team.
+    """
+    user_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        min_length=1,
+        max_length=50
+    )
+    role = serializers.ChoiceField(
+        choices=TeamMember.ROLE_CHOICES,
+        default='member'
+    )
+
+
+class TeamSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Team model.
+    """
+    organization = serializers.StringRelatedField(read_only=True)
+    organization_id = serializers.UUIDField(write_only=True, required=False)
+    lead = UserSerializer(read_only=True)
+    lead_id = serializers.UUIDField(write_only=True, required=False)
+    parent_team = serializers.StringRelatedField(read_only=True)
+    parent_team_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    member_count = serializers.IntegerField(read_only=True)
+    depth = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Team
+        fields = [
+            'id',
+            'organization',
+            'organization_id',
+            'name',
+            'slug',
+            'description',
+            'parent_team',
+            'parent_team_id',
+            'visibility',
+            'status',
+            'lead',
+            'lead_id',
+            'color',
+            'icon',
+            'avatar_url',
+            'settings',
+            'team_permissions',
+            'member_count',
+            'depth',
+            'metadata',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'organization',
+            'slug',
+            'lead',
+            'member_count',
+            'depth',
+            'created_at',
+            'updated_at',
+        ]
+
+
+class TeamCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating a team.
+    """
+    parent_team_id = serializers.UUIDField(required=False, allow_null=True)
+
+    class Meta:
+        model = Team
+        fields = [
+            'name',
+            'description',
+            'parent_team_id',
+            'visibility',
+            'color',
+            'icon',
+        ]
+
+    def validate_name(self, value):
+        """Validate team name."""
+        if len(value) < 2:
+            raise serializers.ValidationError(
+                _("Team name must be at least 2 characters long.")
+            )
+        return value
+
+    def validate_parent_team_id(self, value):
+        """Validate parent team exists in same organization."""
+        if value is None:
+            return None
+
+        organization = self.context['organization']
+
+        try:
+            parent_team = Team.objects.get(id=value, organization=organization)
+        except Team.DoesNotExist:
+            raise serializers.ValidationError(
+                _("Parent team not found in this organization.")
+            )
+
+        # Check max depth (e.g., 5 levels)
+        if parent_team.depth >= 4:
+            raise serializers.ValidationError(
+                _("Maximum team hierarchy depth reached.")
+            )
+
+        return parent_team
+
+    def validate(self, attrs):
+        """Check organization team limits."""
+        organization = self.context['organization']
+        current_team_count = Team.objects.filter(
+            organization=organization,
+            status='active'
+        ).count()
+
+        if current_team_count >= organization.max_teams:
+            raise serializers.ValidationError(
+                _("Organization has reached the maximum number of teams.")
+            )
+
+        return attrs
+
+    def create(self, validated_data):
+        """Create team with creator as lead."""
+        request = self.context['request']
+        organization = self.context['organization']
+        parent_team = validated_data.pop('parent_team_id', None)
+
+        with transaction.atomic():
+            team = Team.objects.create(
+                organization=organization,
+                parent_team=parent_team,
+                lead=request.user,
+                **validated_data
+            )
+
+            # Add creator as team lead
+            TeamMember.objects.create(
+                team=team,
+                user=request.user,
+                role='lead',
+                status='active',
+                added_by=request.user
+            )
+
+            return team
+
+
+class TeamUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for updating a team.
+    """
+    parent_team_id = serializers.UUIDField(required=False, allow_null=True)
+    lead_id = serializers.UUIDField(required=False, allow_null=True)
+
+    class Meta:
+        model = Team
+        fields = [
+            'name',
+            'description',
+            'parent_team_id',
+            'visibility',
+            'status',
+            'lead_id',
+            'color',
+            'icon',
+            'avatar_url',
+            'settings',
+        ]
+
+    def validate_parent_team_id(self, value):
+        """Validate parent team change."""
+        if value is None:
+            return None
+
+        team = self.instance
+
+        # Can't set self as parent
+        if str(value) == str(team.id):
+            raise serializers.ValidationError(
+                _("A team cannot be its own parent.")
+            )
+
+        try:
+            parent_team = Team.objects.get(id=value, organization=team.organization)
+        except Team.DoesNotExist:
+            raise serializers.ValidationError(
+                _("Parent team not found in this organization.")
+            )
+
+        # Can't create circular reference
+        if parent_team.is_descendant_of(team):
+            raise serializers.ValidationError(
+                _("Cannot set a descendant team as parent (circular reference).")
+            )
+
+        return parent_team
+
+    def validate_lead_id(self, value):
+        """Validate new team lead."""
+        if value is None:
+            return None
+
+        team = self.instance
+
+        try:
+            user = User.objects.get(id=value)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(_("User not found."))
+
+        # Must be a team member
+        if not TeamMember.objects.is_member(team, user):
+            raise serializers.ValidationError(
+                _("New lead must be a member of the team.")
+            )
+
+        return user
+
+    def update(self, instance, validated_data):
+        """Update team."""
+        parent_team = validated_data.pop('parent_team_id', None)
+        new_lead = validated_data.pop('lead_id', None)
+
+        if parent_team is not None:
+            instance.parent_team = parent_team
+
+        if new_lead is not None:
+            # Update old lead role
+            if instance.lead:
+                old_lead_membership = TeamMember.objects.get_membership(instance, instance.lead)
+                if old_lead_membership:
+                    old_lead_membership.role = 'member'
+                    old_lead_membership.save(update_fields=['role'])
+
+            # Update new lead role
+            new_lead_membership = TeamMember.objects.get_membership(instance, new_lead)
+            if new_lead_membership:
+                new_lead_membership.role = 'lead'
+                new_lead_membership.save(update_fields=['role'])
+
+            instance.lead = new_lead
+
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+
+        instance.save()
+        return instance
+
+
+class TeamListSerializer(serializers.ModelSerializer):
+    """
+    Lightweight serializer for listing teams.
+    """
+    member_count = serializers.IntegerField(read_only=True)
+    lead = UserSerializer(read_only=True)
+    current_user_role = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Team
+        fields = [
+            'id',
+            'name',
+            'slug',
+            'description',
+            'visibility',
+            'status',
+            'color',
+            'icon',
+            'avatar_url',
+            'lead',
+            'member_count',
+            'current_user_role',
+            'created_at',
+        ]
+
+    def get_current_user_role(self, obj):
+        """Get current user's role in the team."""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return None
+
+        membership = TeamMember.objects.get_membership(obj, request.user)
+        return membership.role if membership else None
+
+
+class TeamHierarchySerializer(serializers.ModelSerializer):
+    """
+    Serializer for team hierarchy (nested children).
+    """
+    children = serializers.SerializerMethodField()
+    member_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Team
+        fields = [
+            'id',
+            'name',
+            'slug',
+            'color',
+            'icon',
+            'member_count',
+            'children',
+        ]
+
+    def get_children(self, obj):
+        """Get child teams recursively."""
+        children = obj.child_teams.filter(status='active')
+        return TeamHierarchySerializer(children, many=True, context=self.context).data
+```
+
+---
+
+## Teams Services
+
+### `apps/teams/services.py`
+
+```python
+"""
+Team business logic services.
+"""
+import logging
+from typing import Optional, List
+from django.db import transaction
+from django.utils import timezone
+
+from apps.core.exceptions import ServiceException, PermissionDeniedException
+from apps.authentication.models import User
+from apps.organizations.models import Organization, OrganizationMember
+from .models import Team, TeamMember
+
+logger = logging.getLogger(__name__)
+
+
+class TeamService:
+    """
+    Service for handling team operations.
+    """
+
+    @staticmethod
+    def create_team(
+        organization: Organization,
+        name: str,
+        created_by: User,
+        parent_team: Optional[Team] = None,
+        **kwargs
+    ) -> Team:
+        """
+        Create a new team.
+        """
+        # Check if user can create teams
+        membership = OrganizationMember.objects.get_membership(organization, created_by)
+        if not membership or not membership.is_admin:
+            raise PermissionDeniedException(
+                "You don't have permission to create teams."
+            )
+
+        # Check team limits
+        current_count = Team.objects.filter(
+            organization=organization,
+            status='active'
+        ).count()
+
+        if current_count >= organization.max_teams:
+            raise ServiceException(
+                f"Organization has reached the maximum number of teams ({organization.max_teams})."
+            )
+
+        with transaction.atomic():
+            team = Team.objects.create(
+                organization=organization,
+                name=name,
+                parent_team=parent_team,
+                lead=created_by,
+                **kwargs
+            )
+
+            # Add creator as lead
+            TeamMember.objects.create(
+                team=team,
+                user=created_by,
+                role='lead',
+                status='active',
+                added_by=created_by
+            )
+
+            logger.info(f"Team created: {team.name}", extra={
+                'team_id': str(team.id),
+                'organization_id': str(organization.id),
+                'created_by': str(created_by.id),
+            })
+
+            return team
+
+    @staticmethod
+    def update_team(
+        team: Team,
+        user: User,
+        **kwargs
+    ) -> Team:
+        """
+        Update team details.
+        """
+        # Check permissions
+        membership = TeamMember.objects.get_membership(team, user)
+        org_membership = OrganizationMember.objects.get_membership(
+            team.organization, user
+        )
+
+        can_update = (
+            (membership and membership.is_lead) or
+            (org_membership and org_membership.is_admin)
+        )
+
+        if not can_update:
+            raise PermissionDeniedException(
+                "You don't have permission to update this team."
+            )
+
+        for field, value in kwargs.items():
+            if hasattr(team, field):
+                setattr(team, field, value)
+
+        team.save()
+
+        logger.info(f"Team updated: {team.name}", extra={
+            'team_id': str(team.id),
+            'updated_by': str(user.id),
+        })
+
+        return team
+
+    @staticmethod
+    def delete_team(
+        team: Team,
+        user: User,
+        reassign_to: Optional[Team] = None
+    ) -> None:
+        """
+        Delete (archive) a team.
+        Optionally reassign child teams and members to another team.
+        """
+        org_membership = OrganizationMember.objects.get_membership(
+            team.organization, user
+        )
+
+        if not org_membership or not org_membership.is_admin:
+            raise PermissionDeniedException(
+                "Only organization admins can delete teams."
+            )
+
+        with transaction.atomic():
+            # Handle child teams
+            if reassign_to:
+                # Reassign children to new parent
+                team.child_teams.update(parent_team=reassign_to)
+            else:
+                # Make children root teams
+                team.child_teams.update(parent_team=None)
+
+            # Archive the team (soft delete)
+            team.status = 'archived'
+            team.save(update_fields=['status', 'updated_at'])
+
+            # Remove all members
+            team.members.update(status='removed')
+
+            logger.info(f"Team deleted: {team.name}", extra={
+                'team_id': str(team.id),
+                'deleted_by': str(user.id),
+            })
+
+    @staticmethod
+    def get_organization_teams(
+        organization: Organization,
+        user: User,
+        include_archived: bool = False
+    ) -> List[Team]:
+        """
+        Get all teams in an organization visible to user.
+        """
+        queryset = Team.objects.visible_to_user(user, organization)
+
+        if not include_archived:
+            queryset = queryset.exclude(status='archived')
+
+        return queryset.with_member_count().with_lead()
+
+    @staticmethod
+    def get_team_hierarchy(organization: Organization) -> List[Team]:
+        """
+        Get team hierarchy (root teams with nested children).
+        """
+        return Team.objects.filter(
+            organization=organization,
+            status='active',
+            parent_team__isnull=True
+        ).with_member_count().prefetch_related('child_teams')
+
+
+class TeamMemberService:
+    """
+    Service for managing team members.
+    """
+
+    @staticmethod
+    def add_member(
+        team: Team,
+        user: User,
+        added_by: User,
+        role: str = 'member',
+        notes: str = ''
+    ) -> TeamMember:
+        """
+        Add a user to a team.
+        """
+        # Check if user can add members
+        adder_team_membership = TeamMember.objects.get_membership(team, added_by)
+        adder_org_membership = OrganizationMember.objects.get_membership(
+            team.organization, added_by
+        )
+
+        can_add = (
+            (adder_team_membership and adder_team_membership.can_manage_members) or
+            (adder_org_membership and adder_org_membership.is_admin)
+        )
+
+        if not can_add:
+            raise PermissionDeniedException(
+                "You don't have permission to add members to this team."
+            )
+
+        # Check if user is org member
+        if not OrganizationMember.objects.is_member(team.organization, user):
+            raise ServiceException(
+                "User must be a member of the organization to join a team."
+            )
+
+        # Check if already a member
+        if TeamMember.objects.is_member(team, user):
+            raise ServiceException("User is already a member of this team.")
+
+        with transaction.atomic():
+            member = TeamMember.objects.create(
+                team=team,
+                user=user,
+                role=role,
+                status='active',
+                added_by=added_by,
+                notes=notes
+            )
+
+            logger.info(f"Member added to team: {user.email}", extra={
+                'team_id': str(team.id),
+                'user_id': str(user.id),
+                'role': role,
+                'added_by': str(added_by.id),
+            })
+
+            # Send notification
+            from .tasks import send_team_member_added_notification
+            send_team_member_added_notification.delay(str(member.id))
+
+            return member
+
+    @staticmethod
+    def bulk_add_members(
+        team: Team,
+        user_ids: List[str],
+        added_by: User,
+        role: str = 'member'
+    ) -> dict:
+        """
+        Add multiple members to a team.
+        Returns dict with successful and failed additions.
+        """
+        results = {
+            'successful': [],
+            'failed': []
+        }
+
+        for user_id in user_ids:
+            try:
+                user = User.objects.get(id=user_id)
+                member = TeamMemberService.add_member(
+                    team=team,
+                    user=user,
+                    added_by=added_by,
+                    role=role
+                )
+                results['successful'].append({
+                    'user_id': str(user_id),
+                    'member_id': str(member.id)
+                })
+            except Exception as e:
+                results['failed'].append({
+                    'user_id': str(user_id),
+                    'error': str(e)
+                })
+
+        return results
+
+    @staticmethod
+    def update_member_role(
+        team: Team,
+        user: User,
+        new_role: str,
+        updated_by: User
+    ) -> TeamMember:
+        """
+        Update a member's role in the team.
+        """
+        # Check permissions
+        updater_membership = TeamMember.objects.get_membership(team, updated_by)
+        updater_org_membership = OrganizationMember.objects.get_membership(
+            team.organization, updated_by
+        )
+
+        can_update = (
+            (updater_membership and updater_membership.can_manage_members) or
+            (updater_org_membership and updater_org_membership.is_admin)
+        )
+
+        if not can_update:
+            raise PermissionDeniedException(
+                "You don't have permission to update member roles."
+            )
+
+        member = TeamMember.objects.get_membership(team, user)
+        if not member:
+            raise ServiceException("User is not a member of this team.")
+
+        old_role = member.role
+        member.role = new_role
+        member.save(update_fields=['role', 'updated_at'])
+
+        # Update team lead if promoting to lead
+        if new_role == 'lead':
+            # Demote current lead if exists
+            if team.lead and team.lead != user:
+                old_lead_membership = TeamMember.objects.get_membership(team, team.lead)
+                if old_lead_membership:
+                    old_lead_membership.role = 'member'
+                    old_lead_membership.save(update_fields=['role'])
+
+            team.lead = user
+            team.save(update_fields=['lead', 'updated_at'])
+
+        logger.info(f"Team member role updated: {user.email}", extra={
+            'team_id': str(team.id),
+            'user_id': str(user.id),
+            'old_role': old_role,
+            'new_role': new_role,
+            'updated_by': str(updated_by.id),
+        })
+
+        return member
+
+    @staticmethod
+    def remove_member(
+        team: Team,
+        user: User,
+        removed_by: User
+    ) -> None:
+        """
+        Remove a member from a team.
+        """
+        # Check permissions
+        remover_membership = TeamMember.objects.get_membership(team, removed_by)
+        remover_org_membership = OrganizationMember.objects.get_membership(
+            team.organization, removed_by
+        )
+
+        can_remove = (
+            (remover_membership and remover_membership.can_manage_members) or
+            (remover_org_membership and remover_org_membership.is_admin) or
+            user == removed_by  # Users can remove themselves
+        )
+
+        if not can_remove:
+            raise PermissionDeniedException(
+                "You don't have permission to remove members from this team."
+            )
+
+        member = TeamMember.objects.get_membership(team, user)
+        if not member:
+            raise ServiceException("User is not a member of this team.")
+
+        # Can't remove the only lead without replacement
+        if member.is_lead:
+            other_leads = team.members.filter(role='lead', status='active').exclude(user=user)
+            if not other_leads.exists():
+                raise ServiceException(
+                    "Cannot remove the only team lead. Assign another lead first."
+                )
+
+        with transaction.atomic():
+            member.status = 'removed'
+            member.save(update_fields=['status', 'updated_at'])
+
+            # Update team lead if removed
+            if team.lead == user:
+                new_lead = team.members.filter(
+                    role='lead', status='active'
+                ).first()
+                team.lead = new_lead.user if new_lead else None
+                team.save(update_fields=['lead', 'updated_at'])
+
+            logger.info(f"Member removed from team: {user.email}", extra={
+                'team_id': str(team.id),
+                'user_id': str(user.id),
+                'removed_by': str(removed_by.id),
+            })
+
+            # Send notification
+            from .tasks import send_team_member_removed_notification
+            send_team_member_removed_notification.delay(
+                str(user.id),
+                team.name
+            )
+
+    @staticmethod
+    def get_user_teams(
+        user: User,
+        organization: Organization
+    ) -> List[Team]:
+        """
+        Get all teams a user belongs to in an organization.
+        """
+        return Team.objects.filter(
+            organization=organization,
+            members__user=user,
+            members__status='active',
+            status='active'
+        ).distinct()
+```
+
+---
+
+## Teams Views
+
+### `apps/teams/views.py`
+
+```python
+"""
+Team views.
+"""
+import logging
+from rest_framework import status, generics, views
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter
+from django.shortcuts import get_object_or_404
+
+from apps.core.permissions import IsOrganizationMember
+from apps.organizations.models import Organization
+from .models import Team, TeamMember
+from .serializers import (
+    TeamSerializer,
+    TeamCreateSerializer,
+    TeamUpdateSerializer,
+    TeamListSerializer,
+    TeamHierarchySerializer,
+    TeamMemberSerializer,
+    TeamMemberCreateSerializer,
+    TeamMemberUpdateSerializer,
+    TeamMemberBulkAddSerializer,
+)
+from .services import TeamService, TeamMemberService
+
+logger = logging.getLogger(__name__)
+
+
+class OrganizationTeamMixin:
+    """
+    Mixin to get organization from URL.
+    """
+    def get_organization(self):
+        org_id = self.kwargs.get('org_id')
+        return get_object_or_404(Organization, id=org_id)
+
+
+@extend_schema(tags=['Teams'])
+class TeamListView(OrganizationTeamMixin, generics.ListAPIView):
+    """
+    List all teams in an organization.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = TeamListSerializer
+
+    @extend_schema(
+        summary="List organization teams",
+        parameters=[
+            OpenApiParameter(
+                name='include_archived',
+                type=bool,
+                description='Include archived teams'
+            ),
+        ],
+        responses={200: TeamListSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        include_archived = self.request.query_params.get('include_archived', 'false').lower() == 'true'
+
+        return TeamService.get_organization_teams(
+            organization=organization,
+            user=self.request.user,
+            include_archived=include_archived
+        )
+
+
+@extend_schema(tags=['Teams'])
+class TeamHierarchyView(OrganizationTeamMixin, generics.ListAPIView):
+    """
+    Get team hierarchy (nested structure).
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = TeamHierarchySerializer
+
+    @extend_schema(
+        summary="Get team hierarchy",
+        responses={200: TeamHierarchySerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return TeamService.get_team_hierarchy(organization)
+
+
+@extend_schema(tags=['Teams'])
+class TeamCreateView(OrganizationTeamMixin, generics.CreateAPIView):
+    """
+    Create a new team.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = TeamCreateSerializer
+
+    @extend_schema(
+        summary="Create team",
+        responses={
+            201: TeamSerializer,
+            400: OpenApiResponse(description="Validation error"),
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['organization'] = self.get_organization()
+        return context
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        team = serializer.save()
+
+        return Response({
+            'data': TeamSerializer(team, context={'request': request}).data,
+            'message': 'Team created successfully.'
+        }, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(tags=['Teams'])
+class TeamDetailView(OrganizationTeamMixin, generics.RetrieveAPIView):
+    """
+    Get team details.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = TeamSerializer
+    lookup_url_kwarg = 'team_id'
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return Team.objects.visible_to_user(
+            self.request.user,
+            organization
+        ).with_member_count().with_lead()
+
+
+@extend_schema(tags=['Teams'])
+class TeamUpdateView(OrganizationTeamMixin, generics.UpdateAPIView):
+    """
+    Update team details.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = TeamUpdateSerializer
+    lookup_url_kwarg = 'team_id'
+
+    @extend_schema(
+        summary="Update team",
+        responses={200: TeamSerializer}
+    )
+    def patch(self, request, *args, **kwargs):
+        return super().patch(request, *args, **kwargs)
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return Team.objects.filter(organization=organization)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', True)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        team = serializer.save()
+
+        return Response({
+            'data': TeamSerializer(team, context={'request': request}).data,
+            'message': 'Team updated successfully.'
+        })
+
+
+@extend_schema(tags=['Teams'])
+class TeamDeleteView(OrganizationTeamMixin, generics.DestroyAPIView):
+    """
+    Delete (archive) a team.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    lookup_url_kwarg = 'team_id'
+
+    @extend_schema(
+        summary="Delete team",
+        parameters=[
+            OpenApiParameter(
+                name='reassign_to',
+                type=str,
+                description='Team ID to reassign children to'
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(description="Team deleted"),
+            403: OpenApiResponse(description="Permission denied"),
+        }
+    )
+    def delete(self, request, *args, **kwargs):
+        team = self.get_object()
+        reassign_to_id = request.query_params.get('reassign_to')
+
+        reassign_to = None
+        if reassign_to_id:
+            reassign_to = get_object_or_404(
+                Team,
+                id=reassign_to_id,
+                organization=team.organization
+            )
+
+        TeamService.delete_team(
+            team=team,
+            user=request.user,
+            reassign_to=reassign_to
+        )
+
+        return Response({
+            'message': 'Team deleted successfully.'
+        })
+
+    def get_queryset(self):
+        organization = self.get_organization()
+        return Team.objects.filter(organization=organization)
+
+
+# Team Members Views
+
+@extend_schema(tags=['Team Members'])
+class TeamMemberListView(OrganizationTeamMixin, generics.ListAPIView):
+    """
+    List team members.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = TeamMemberSerializer
+
+    @extend_schema(
+        summary="List team members",
+        responses={200: TeamMemberSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        team_id = self.kwargs.get('team_id')
+        return TeamMember.objects.filter(
+            team_id=team_id,
+            status='active'
+        ).with_user().order_by('-joined_at')
+
+
+@extend_schema(tags=['Team Members'])
+class TeamMemberAddView(OrganizationTeamMixin, views.APIView):
+    """
+    Add a member to a team.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Add team member",
+        request=TeamMemberCreateSerializer,
+        responses={
+            201: TeamMemberSerializer,
+            400: OpenApiResponse(description="Validation error"),
+        }
+    )
+    def post(self, request, org_id, team_id):
+        team = get_object_or_404(Team, id=team_id, organization_id=org_id)
+
+        serializer = TeamMemberCreateSerializer(
+            data=request.data,
+            context={'request': request, 'team': team}
+        )
+        serializer.is_valid(raise_exception=True)
+
+        user = serializer.validated_data['user_id']
+        role = serializer.validated_data.get('role', 'member')
+        notes = serializer.validated_data.get('notes', '')
+
+        member = TeamMemberService.add_member(
+            team=team,
+            user=user,
+            added_by=request.user,
+            role=role,
+            notes=notes
+        )
+
+        return Response({
+            'data': TeamMemberSerializer(member).data,
+            'message': 'Member added successfully.'
+        }, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(tags=['Team Members'])
+class TeamMemberBulkAddView(OrganizationTeamMixin, views.APIView):
+    """
+    Bulk add members to a team.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Bulk add team members",
+        request=TeamMemberBulkAddSerializer,
+        responses={
+            200: OpenApiResponse(description="Bulk add results"),
+        }
+    )
+    def post(self, request, org_id, team_id):
+        team = get_object_or_404(Team, id=team_id, organization_id=org_id)
+
+        serializer = TeamMemberBulkAddSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        results = TeamMemberService.bulk_add_members(
+            team=team,
+            user_ids=serializer.validated_data['user_ids'],
+            added_by=request.user,
+            role=serializer.validated_data.get('role', 'member')
+        )
+
+        return Response({
+            'data': results,
+            'message': f"Added {len(results['successful'])} members, {len(results['failed'])} failed."
+        })
+
+
+@extend_schema(tags=['Team Members'])
+class TeamMemberDetailView(OrganizationTeamMixin, generics.RetrieveAPIView):
+    """
+    Get team member details.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = TeamMemberSerializer
+    lookup_url_kwarg = 'member_id'
+
+    def get_queryset(self):
+        team_id = self.kwargs.get('team_id')
+        return TeamMember.objects.filter(team_id=team_id).with_user()
+
+
+@extend_schema(tags=['Team Members'])
+class TeamMemberUpdateView(OrganizationTeamMixin, generics.UpdateAPIView):
+    """
+    Update team member role.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+    serializer_class = TeamMemberUpdateSerializer
+    lookup_url_kwarg = 'member_id'
+
+    @extend_schema(
+        summary="Update team member",
+        responses={200: TeamMemberSerializer}
+    )
+    def patch(self, request, *args, **kwargs):
+        return super().patch(request, *args, **kwargs)
+
+    def get_queryset(self):
+        team_id = self.kwargs.get('team_id')
+        return TeamMember.objects.filter(team_id=team_id)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', True)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        member = serializer.save()
+
+        return Response({
+            'data': TeamMemberSerializer(member).data,
+            'message': 'Member updated successfully.'
+        })
+
+
+@extend_schema(tags=['Team Members'])
+class TeamMemberRemoveView(OrganizationTeamMixin, views.APIView):
+    """
+    Remove a member from a team.
+    """
+    permission_classes = [IsAuthenticated, IsOrganizationMember]
+
+    @extend_schema(
+        summary="Remove team member",
+        responses={
+            200: OpenApiResponse(description="Member removed"),
+            403: OpenApiResponse(description="Permission denied"),
+        }
+    )
+    def delete(self, request, org_id, team_id, user_id):
+        team = get_object_or_404(Team, id=team_id, organization_id=org_id)
+        user = get_object_or_404(User, id=user_id)
+
+        TeamMemberService.remove_member(
+            team=team,
+            user=user,
+            removed_by=request.user
+        )
+
+        return Response({
+            'message': 'Member removed successfully.'
+        })
+
+
+# Import User for TeamMemberRemoveView
+from apps.authentication.models import User
+```
+
+---
+
+## Teams URLs
+
+### `apps/teams/urls.py`
+
+```python
+"""
+Team URL patterns.
+"""
+from django.urls import path
+from .views import (
+    TeamListView,
+    TeamHierarchyView,
+    TeamCreateView,
+    TeamDetailView,
+    TeamUpdateView,
+    TeamDeleteView,
+    TeamMemberListView,
+    TeamMemberAddView,
+    TeamMemberBulkAddView,
+    TeamMemberDetailView,
+    TeamMemberUpdateView,
+    TeamMemberRemoveView,
+)
+
+app_name = 'teams'
+
+urlpatterns = [
+    # Teams
+    path(
+        'organizations/<uuid:org_id>/teams/',
+        TeamListView.as_view(),
+        name='list'
+    ),
+    path(
+        'organizations/<uuid:org_id>/teams/hierarchy/',
+        TeamHierarchyView.as_view(),
+        name='hierarchy'
+    ),
+    path(
+        'organizations/<uuid:org_id>/teams/create/',
+        TeamCreateView.as_view(),
+        name='create'
+    ),
+    path(
+        'organizations/<uuid:org_id>/teams/<uuid:team_id>/',
+        TeamDetailView.as_view(),
+        name='detail'
+    ),
+    path(
+        'organizations/<uuid:org_id>/teams/<uuid:team_id>/update/',
+        TeamUpdateView.as_view(),
+        name='update'
+    ),
+    path(
+        'organizations/<uuid:org_id>/teams/<uuid:team_id>/delete/',
+        TeamDeleteView.as_view(),
+        name='delete'
+    ),
+
+    # Team Members
+    path(
+        'organizations/<uuid:org_id>/teams/<uuid:team_id>/members/',
+        TeamMemberListView.as_view(),
+        name='members-list'
+    ),
+    path(
+        'organizations/<uuid:org_id>/teams/<uuid:team_id>/members/add/',
+        TeamMemberAddView.as_view(),
+        name='members-add'
+    ),
+    path(
+        'organizations/<uuid:org_id>/teams/<uuid:team_id>/members/bulk-add/',
+        TeamMemberBulkAddView.as_view(),
+        name='members-bulk-add'
+    ),
+    path(
+        'organizations/<uuid:org_id>/teams/<uuid:team_id>/members/<uuid:member_id>/',
+        TeamMemberDetailView.as_view(),
+        name='members-detail'
+    ),
+    path(
+        'organizations/<uuid:org_id>/teams/<uuid:team_id>/members/<uuid:member_id>/update/',
+        TeamMemberUpdateView.as_view(),
+        name='members-update'
+    ),
+    path(
+        'organizations/<uuid:org_id>/teams/<uuid:team_id>/members/<uuid:user_id>/remove/',
+        TeamMemberRemoveView.as_view(),
+        name='members-remove'
+    ),
+]
+```
+
+---
+
+## Teams Tasks
+
+### `apps/teams/tasks.py`
+
+```python
+"""
+Celery tasks for teams.
+"""
+import logging
+from celery import shared_task
+from django.core.mail import send_mail
+from django.conf import settings
+from django.template.loader import render_to_string
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_team_member_added_notification(self, member_id: str):
+    """
+    Send notification when user is added to a team.
+    """
+    try:
+        from .models import TeamMember
+
+        member = TeamMember.objects.select_related(
+            'team', 'team__organization', 'user', 'added_by'
+        ).get(id=member_id)
+
+        subject = f"You've been added to {member.team.name}"
+        html_message = render_to_string('emails/team_member_added.html', {
+            'member': member,
+            'team': member.team,
+            'organization': member.team.organization,
+            'added_by': member.added_by,
+        })
+        plain_message = f"""
+Hi {member.user.display_name},
+
+You've been added to the team "{member.team.name}" in {member.team.organization.name}.
+
+Role: {member.get_role_display()}
+Added by: {member.added_by.display_name if member.added_by else 'System'}
+
+Best,
+The Team
+        """
+
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[member.user.email],
+            html_message=html_message,
+            fail_silently=False,
+        )
+
+        logger.info(f"Team member added notification sent to: {member.user.email}")
+
+    except Exception as exc:
+        logger.error(f"Failed to send team member added notification: {exc}")
+        raise self.retry(exc=exc)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_team_member_removed_notification(self, user_id: str, team_name: str):
+    """
+    Send notification when user is removed from a team.
+    """
+    try:
+        from apps.authentication.models import User
+
+        user = User.objects.get(id=user_id)
+
+        subject = f"You've been removed from {team_name}"
+        plain_message = f"""
+Hi {user.display_name},
+
+You've been removed from the team "{team_name}".
+
+If you believe this was a mistake, please contact your team administrator.
+
+Best,
+The Team
+        """
+
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+            fail_silently=False,
+        )
+
+        logger.info(f"Team member removed notification sent to: {user.email}")
+
+    except Exception as exc:
+        logger.error(f"Failed to send team member removed notification: {exc}")
+        raise self.retry(exc=exc)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_team_role_changed_notification(self, member_id: str, old_role: str, new_role: str):
+    """
+    Send notification when user's team role is changed.
+    """
+    try:
+        from .models import TeamMember
+
+        member = TeamMember.objects.select_related(
+            'team', 'user'
+        ).get(id=member_id)
+
+        subject = f"Your role in {member.team.name} has changed"
+        plain_message = f"""
+Hi {member.user.display_name},
+
+Your role in the team "{member.team.name}" has been changed from {old_role} to {new_role}.
+
+Best,
+The Team
+        """
+
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[member.user.email],
+            fail_silently=False,
+        )
+
+        logger.info(f"Team role changed notification sent to: {member.user.email}")
+
+    except Exception as exc:
+        logger.error(f"Failed to send team role changed notification: {exc}")
+        raise self.retry(exc=exc)
+```
+
+---
+
+## Teams Signals
+
+### `apps/teams/signals.py`
+
+```python
+"""
+Team signals.
+"""
+import logging
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+from .models import Team, TeamMember
+
+logger = logging.getLogger(__name__)
+
+
+@receiver(post_save, sender=Team)
+def team_created_or_updated(sender, instance, created, **kwargs):
+    """
+    Handle team creation/update.
+    """
+    if created:
+        logger.info(f"Team created: {instance.name}", extra={
+            'team_id': str(instance.id),
+            'organization_id': str(instance.organization_id),
+        })
+
+
+@receiver(post_save, sender=TeamMember)
+def team_member_saved(sender, instance, created, **kwargs):
+    """
+    Handle team member creation/update.
+    """
+    if created:
+        logger.info(f"Team member added: {instance.user.email} to {instance.team.name}", extra={
+            'team_id': str(instance.team_id),
+            'user_id': str(instance.user_id),
+            'role': instance.role,
+        })
+
+
+@receiver(post_delete, sender=TeamMember)
+def team_member_deleted(sender, instance, **kwargs):
+    """
+    Handle team member deletion.
+    """
+    logger.info(f"Team member removed: {instance.user.email} from {instance.team.name}", extra={
+        'team_id': str(instance.team_id),
+        'user_id': str(instance.user_id),
+    })
+```
+
+---
+
+## Teams Admin
+
+### `apps/teams/admin.py`
+
+```python
+"""
+Admin configuration for team models.
+"""
+from django.contrib import admin
+from django.utils.html import format_html
+from .models import Team, TeamMember
+
+
+class TeamMemberInline(admin.TabularInline):
+    """
+    Inline admin for team members.
+    """
+    model = TeamMember
+    extra = 0
+    readonly_fields = ['joined_at', 'added_by']
+    raw_id_fields = ['user', 'added_by']
+    fields = ['user', 'role', 'status', 'joined_at', 'added_by']
+
+
+@admin.register(Team)
+class TeamAdmin(admin.ModelAdmin):
+    """
+    Admin for Team model.
+    """
+    list_display = [
+        'name',
+        'organization',
+        'status',
+        'visibility',
+        'lead',
+        'member_count_display',
+        'parent_team',
+        'created_at',
+    ]
+    list_filter = [
+        'status',
+        'visibility',
+        'organization',
+        'created_at',
+    ]
+    search_fields = [
+        'name',
+        'slug',
+        'organization__name',
+        'lead__email',
+    ]
+    readonly_fields = [
+        'id',
+        'slug',
+        'member_count_display',
+        'depth',
+        'created_at',
+        'updated_at',
+    ]
+    raw_id_fields = ['organization', 'lead', 'parent_team']
+    inlines = [TeamMemberInline]
+    ordering = ['-created_at']
+
+    fieldsets = (
+        (None, {
+            'fields': ('id', 'organization', 'name', 'slug', 'description')
+        }),
+        ('Hierarchy', {
+            'fields': ('parent_team', 'depth')
+        }),
+        ('Status & Visibility', {
+            'fields': ('status', 'visibility')
+        }),
+        ('Leadership', {
+            'fields': ('lead',)
+        }),
+        ('Appearance', {
+            'fields': ('color', 'icon', 'avatar_url')
+        }),
+        ('Settings', {
+            'fields': ('settings', 'team_permissions'),
+            'classes': ('collapse',)
+        }),
+        ('Metadata', {
+            'fields': ('metadata', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def member_count_display(self, obj):
+        """Display member count."""
+        return obj.member_count
+    member_count_display.short_description = 'Members'
+
+
+@admin.register(TeamMember)
+class TeamMemberAdmin(admin.ModelAdmin):
+    """
+    Admin for TeamMember model.
+    """
+    list_display = [
+        'user',
+        'team',
+        'role',
+        'status',
+        'joined_at',
+        'added_by',
+    ]
+    list_filter = [
+        'role',
+        'status',
+        'team__organization',
+        'joined_at',
+    ]
+    search_fields = [
+        'user__email',
+        'user__display_name',
+        'team__name',
+    ]
+    readonly_fields = [
+        'id',
+        'joined_at',
+        'created_at',
+        'updated_at',
+    ]
+    raw_id_fields = ['team', 'user', 'added_by']
+    ordering = ['-joined_at']
+
+    fieldsets = (
+        (None, {
+            'fields': ('id', 'team', 'user')
+        }),
+        ('Role & Status', {
+            'fields': ('role', 'status')
+        }),
+        ('Tracking', {
+            'fields': ('joined_at', 'added_by')
+        }),
+        ('Additional', {
+            'fields': ('custom_permissions', 'notes'),
+            'classes': ('collapse',)
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+```
+
+---
+
+## Teams Email Template
+
+### `templates/emails/team_member_added.html`
+
+```html
+{% extends "emails/base_email.html" %} {% block title %}Added to Team{% endblock
+%} {% block content %}
+<h2>Hi {{ member.user.display_name }},</h2>
+
+<p>
+  You've been added to the team <strong>{{ team.name }}</strong> in {{
+  organization.name }}.
+</p>
+
+<table style="border-collapse: collapse; margin: 20px 0;">
+  <tr>
+    <td style="padding: 10px; border: 1px solid #ddd;">
+      <strong>Team</strong>
+    </td>
+    <td style="padding: 10px; border: 1px solid #ddd;">{{ team.name }}</td>
+  </tr>
+  <tr>
+    <td style="padding: 10px; border: 1px solid #ddd;">
+      <strong>Role</strong>
+    </td>
+    <td style="padding: 10px; border: 1px solid #ddd;">
+      {{ member.get_role_display }}
+    </td>
+  </tr>
+  {% if added_by %}
+  <tr>
+    <td style="padding: 10px; border: 1px solid #ddd;">
+      <strong>Added by</strong>
+    </td>
+    <td style="padding: 10px; border: 1px solid #ddd;">
+      {{ added_by.display_name }}
+    </td>
+  </tr>
+  {% endif %}
+</table>
+
+{% if team.description %}
+<p><strong>About the team:</strong> {{ team.description }}</p>
+{% endif %}
+
+<p style="text-align: center;">
+  <a
+    href="https://{{ domain }}/organizations/{{ organization.slug }}/teams/{{ team.slug }}"
+    class="button"
+  >
+    View Team
+  </a>
+</p>
+
+<p>Best,<br />The Team</p>
+{% endblock %}
+```
+
+---
+
+## Organization Admin (Complete)
+
+### `apps/organizations/admin.py`
+
+```python
+"""
+Admin configuration for organization models.
+"""
+from django.contrib import admin
+from django.utils.html import format_html
+from .models import Organization, OrganizationMember, OrganizationSettings
+
+
+class OrganizationMemberInline(admin.TabularInline):
+    """
+    Inline admin for organization members.
+    """
+    model = OrganizationMember
+    extra = 0
+    readonly_fields = ['joined_at', 'invited_by']
+    raw_id_fields = ['user', 'invited_by']
+    fields = ['user', 'role', 'status', 'joined_at', 'invited_by']
+
+
+class OrganizationSettingsInline(admin.StackedInline):
+    """
+    Inline admin for organization settings.
+    """
+    model = OrganizationSettings
+    can_delete = False
+    fields = [
+        'timezone', 'locale', 'date_format', 'time_format',
+        'require_2fa', 'allowed_email_domains', 'ip_whitelist',
+        'session_timeout_minutes', 'enabled_features',
+    ]
+
+
+@admin.register(Organization)
+class OrganizationAdmin(admin.ModelAdmin):
+    """
+    Admin for Organization model.
+    """
+    list_display = [
+        'name',
+        'slug',
+        'owner',
+        'tier',
+        'status',
+        'member_count_display',
+        'created_at',
+    ]
+    list_filter = [
+        'tier',
+        'status',
+        'isolation_level',
+        'created_at',
+    ]
+    search_fields = [
+        'name',
+        'slug',
+        'owner__email',
+        'billing_email',
+    ]
+    readonly_fields = [
+        'id',
+        'slug',
+        'member_count_display',
+        'created_at',
+        'updated_at',
+        'deleted_at',
+    ]
+    raw_id_fields = ['owner']
+    inlines = [OrganizationSettingsInline, OrganizationMemberInline]
+    ordering = ['-created_at']
+
+    fieldsets = (
+        (None, {
+            'fields': ('id', 'name', 'slug', 'description', 'owner')
+        }),
+        ('Status & Tier', {
+            'fields': ('status', 'tier', 'trial_ends_at', 'isolation_level')
+        }),
+        ('Branding', {
+            'fields': ('logo_url', 'website')
+        }),
+        ('Contact', {
+            'fields': ('billing_email', 'support_email')
+        }),
+        ('Address', {
+            'fields': (
+                'country', 'address_line1', 'address_line2',
+                'city', 'state_province', 'postal_code', 'tax_id'
+            ),
+            'classes': ('collapse',)
+        }),
+        ('Limits', {
+            'fields': ('max_members', 'max_teams', 'max_projects'),
+            'classes': ('collapse',)
+        }),
+        ('Metadata', {
+            'fields': ('metadata', 'created_at', 'updated_at', 'deleted_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def member_count_display(self, obj):
+        """Display member count."""
+        return obj.member_count
+    member_count_display.short_description = 'Members'
+
+    actions = ['suspend_organizations', 'activate_organizations']
+
+    @admin.action(description='Suspend selected organizations')
+    def suspend_organizations(self, request, queryset):
+        from .services import OrganizationService
+        for org in queryset:
+            OrganizationService.suspend_organization(org, 'Admin action')
+        self.message_user(request, f"Suspended {queryset.count()} organization(s).")
+
+    @admin.action(description='Activate selected organizations')
+    def activate_organizations(self, request, queryset):
+        from .services import OrganizationService
+        for org in queryset:
+            OrganizationService.activate_organization(org)
+        self.message_user(request, f"Activated {queryset.count()} organization(s).")
+
+
+@admin.register(OrganizationMember)
+class OrganizationMemberAdmin(admin.ModelAdmin):
+    """
+    Admin for OrganizationMember model.
+    """
+    list_display = [
+        'user',
+        'organization',
+        'role',
+        'status',
+        'joined_at',
+    ]
+    list_filter = [
+        'role',
+        'status',
+        'organization',
+        'joined_at',
+    ]
+    search_fields = [
+        'user__email',
+        'user__display_name',
+        'organization__name',
+    ]
+    readonly_fields = [
+        'id',
+        'joined_at',
+        'created_at',
+        'updated_at',
+    ]
+    raw_id_fields = ['organization', 'user', 'invited_by']
+    ordering = ['-joined_at']
+
+
+@admin.register(OrganizationSettings)
+class OrganizationSettingsAdmin(admin.ModelAdmin):
+    """
+    Admin for OrganizationSettings model.
+    """
+    list_display = [
+        'organization',
+        'timezone',
+        'locale',
+        'require_2fa',
+    ]
+    list_filter = [
+        'require_2fa',
+        'timezone',
+    ]
+    search_fields = [
+        'organization__name',
+    ]
+    readonly_fields = [
+        'id',
+        'created_at',
+        'updated_at',
+    ]
+    raw_id_fields = ['organization']
+```
+
+---
+
+## Organization Signals
+
+### `apps/organizations/signals.py`
+
+```python
+"""
+Organization signals.
+"""
+import logging
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+from .models import Organization, OrganizationMember, OrganizationSettings
+
+logger = logging.getLogger(__name__)
+
+
+@receiver(post_save, sender=Organization)
+def organization_saved(sender, instance, created, **kwargs):
+    """
+    Handle organization creation/update.
+    """
+    if created:
+        # Create default settings if not exists
+        OrganizationSettings.objects.get_or_create(organization=instance)
+
+        logger.info(f"Organization created: {instance.name}", extra={
+            'organization_id': str(instance.id),
+            'owner_id': str(instance.owner_id),
+        })
+
+
+@receiver(post_save, sender=OrganizationMember)
+def organization_member_saved(sender, instance, created, **kwargs):
+    """
+    Handle organization member creation/update.
+    """
+    if created:
+        logger.info(
+            f"Organization member added: {instance.user.email} to {instance.organization.name}",
+            extra={
+                'organization_id': str(instance.organization_id),
+                'user_id': str(instance.user_id),
+                'role': instance.role,
+            }
+        )
+
+
+@receiver(post_delete, sender=OrganizationMember)
+def organization_member_deleted(sender, instance, **kwargs):
+    """
+    Handle organization member deletion.
+    """
+    logger.info(
+        f"Organization member removed: {instance.user.email} from {instance.organization.name}",
+        extra={
+            'organization_id': str(instance.organization_id),
+            'user_id': str(instance.user_id),
+        }
+    )
+```
+
+---
+
+## Phase 3 Complete Summary
+
+### What we implemented:
+
+**Organizations:**
+
+- ✅ Organization model with full fields (billing, address, limits, status)
+- ✅ OrganizationMember with roles and status
+- ✅ OrganizationSettings for configurable settings
+- ✅ Custom managers with useful queries
+- ✅ Services for business logic
+- ✅ Serializers (list, detail, create, update)
+- ✅ Views and URLs
+- ✅ Celery tasks for notifications
+- ✅ Signals for events
+- ✅ Admin configuration
+
+**Teams:**
+
+- ✅ Team model with hierarchy support
+- ✅ TeamMember with roles
+- ✅ Custom managers
+- ✅ Complete services (create, update, delete, manage members)
+- ✅ Serializers including hierarchy serializer
+- ✅ Views (CRUD + member management + bulk operations)
+- ✅ URLs
+- ✅ Celery tasks
+- ✅ Signals
+- ✅ Admin configuration
+- ✅ Email templates
+
+### API Endpoints Implemented:
+
+**Organizations:**
+
+- `GET /api/v1/organizations/` - List user's organizations
+- `POST /api/v1/organizations/create/` - Create organization
+- `GET /api/v1/organizations/{org_id}/` - Get organization
+- `PATCH /api/v1/organizations/{org_id}/update/` - Update organization
+- `DELETE /api/v1/organizations/{org_id}/delete/` - Delete organization
+- `GET /api/v1/organizations/{org_id}/members/` - List members
+- `PATCH /api/v1/organizations/{org_id}/members/{user_id}/update/` - Update member
+- `POST /api/v1/organizations/{org_id}/transfer-ownership/` - Transfer ownership
+- `GET/PATCH /api/v1/organizations/{org_id}/settings/` - Get/Update settings
+
+**Teams:**
+
+- `GET /api/v1/organizations/{org_id}/teams/` - List teams
+- `GET /api/v1/organizations/{org_id}/teams/hierarchy/` - Get team hierarchy
+- `POST /api/v1/organizations/{org_id}/teams/create/` - Create team
+- `GET /api/v1/organizations/{org_id}/teams/{team_id}/` - Get team
+- `PATCH /api/v1/organizations/{org_id}/teams/{team_id}/update/` - Update team
+- `DELETE /api/v1/organizations/{org_id}/teams/{team_id}/delete/` - Delete team
+- `GET /api/v1/organizations/{org_id}/teams/{team_id}/members/` - List members
+- `POST /api/v1/organizations/{org_id}/teams/{team_id}/members/add/` - Add member
+- `POST /api/v1/organizations/{org_id}/teams/{team_id}/members/bulk-add/` - Bulk add
+- `GET /api/v1/organizations/{org_id}/teams/{team_id}/members/{member_id}/` - Get member
+- `PATCH /api/v1/organizations/{org_id}/teams/{team_id}/members/{member_id}/update/` - Update member
+- `DELETE /api/v1/organizations/{org_id}/teams/{team_id}/members/{user_id}/remove/` - Remove member
+
