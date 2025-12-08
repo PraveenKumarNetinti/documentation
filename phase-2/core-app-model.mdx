@@ -518,6 +518,10 @@ class IsOwnerOrReadOnly(permissions.BasePermission):
         return obj.created_by == request.user if hasattr(obj, 'created_by') else False
 ```
 
+<Note>
+Custom exception handling provides consistent error responses across your API and makes debugging easier with request IDs.
+</Note>
+
 ### `apps/core/exceptions.py`
 
 ```python
