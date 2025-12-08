@@ -419,6 +419,10 @@ REST_FRAMEWORK = {
     'EXCEPTION_HANDLER': 'apps.core.exceptions.custom_exception_handler',
 }
 
+<Info>
+**JWT Configuration**: Short-lived access tokens (15 min) with refresh token rotation provide security while maintaining good UX.
+</Info>
+
 # JWT Settings
 from datetime import timedelta
 
