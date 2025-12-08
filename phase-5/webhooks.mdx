@@ -4,7 +4,15 @@ description: 'Continuing with a**Webhooks System**.'
 sidebarTitle: 'Webhooks System'
 ---
 
+<Info>
+**Webhooks System**: Webhooks allow your application to send real-time event notifications to external services. They include automatic retries, delivery tracking, and HMAC signature verification for security.
+</Info>
+
 ### `apps/webhooks/apps.py`
+
+<Note>
+**Event-Driven Architecture**: Webhooks enable event-driven integrations. When something happens in your app (user created, payment received), registered webhooks are automatically notified.
+</Note>
 
 ```python
 from django.apps import AppConfig
@@ -29,6 +37,10 @@ from apps.core.utils import generate_random_token, generate_secure_hash
 from apps.organizations.models import Organization
 from apps.authentication.models import User
 
+
+<Warning>
+**Secret Management**: Each webhook has a unique secret key used to sign payloads with HMAC-SHA256. Recipients verify signatures to ensure requests are authentic and haven't been tampered with.
+</Warning>
 
 class Webhook(BaseModel):
     """
@@ -74,6 +86,10 @@ class Webhook(BaseModel):
         help_text=_('Request timeout in seconds')
     )
     
+<Note>
+**Automatic Retries**: Failed webhook deliveries are automatically retried with exponential backoff (60s, 120s, 240s). This handles temporary network issues or endpoint downtime gracefully.
+</Note>
+
     # Retry configuration
     max_retries = models.IntegerField(default=3)
     retry_delay = models.IntegerField(
@@ -144,6 +160,10 @@ class Webhook(BaseModel):
             'last_failure_at',
         ])
 
+
+<Info>
+**Delivery Tracking**: Every webhook delivery is logged with full request/response details, timing metrics, and error messages. This makes debugging integration issues straightforward.
+</Info>
 
 class WebhookDelivery(BaseModel):
     """
@@ -328,6 +348,10 @@ class WebhookService:
         # Generate signature
         signature = WebhookService.sign_payload(payload_str, webhook.secret)
         
+<Note>
+**Webhook Headers**: Each delivery includes metadata headers: signature for verification, event type for routing, delivery ID for idempotency, and attempt number for retry tracking.
+</Note>
+
         # Prepare headers
         headers = {
             'Content-Type': 'application/json',
@@ -383,6 +407,10 @@ class WebhookService:
             delivery.status = 'failed'
             webhook.increment_stats(success=False)
 
+<Info>
+**Exponential Backoff**: Retries use exponential backoff to avoid overwhelming failing endpoints. With 60s base delay: 1st retry after 60s, 2nd after 120s, 3rd after 240s.
+</Info>
+
             # Schedule retry
             if delivery.can_retry:
                 delivery.attempt += 1
@@ -404,6 +432,10 @@ class WebhookService:
 
             delivery.save()
             return False
+
+<Note>
+**Event Broadcasting**: When you trigger an event, the system finds all active webhooks subscribed to that event type and queues deliveries asynchronously via Celery for non-blocking execution.
+</Note>
 
     @staticmethod
     def trigger_event(

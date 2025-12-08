@@ -4,7 +4,15 @@ description: '**RBAC (Role-Based Access Control)** system with custom roles and 
 sidebarTitle: "RBAC System"
 ---
 
+<Info>
+**RBAC (Role-Based Access Control)** provides fine-grained permissions management. It supports system roles (owner, admin, member, viewer) and custom organization-specific roles with permission inheritance.
+</Info>
+
 ## RBAC App Structure
+
+<Note>
+**Permission Format**: Permissions follow the pattern `resource.action` (e.g., `members.create`, `billing.manage`). This makes them intuitive and easy to manage in the UI.
+</Note>
 
 ```
 apps/rbac/
@@ -146,6 +154,10 @@ class Permission(BaseModel):
             self.codename = f"{self.resource}.{self.action}"
         super().save(*args, **kwargs)
 
+
+<Info>
+**Role Inheritance**: Roles can inherit from other roles, reducing duplication. For example, an "Editor" role can inherit all "Viewer" permissions plus additional edit permissions.
+</Info>
 
 class Role(BaseModel):
     """
@@ -292,6 +304,10 @@ class Role(BaseModel):
         return permission_codename in self.get_all_permission_codenames()
 
 
+<Warning>
+**Permission Caching**: User permissions are cached for 5 minutes to improve performance. The cache is automatically cleared when roles or assignments change.
+</Warning>
+
 class UserRole(BaseModel):
     """
     Assignment of roles to users within organizations.
@@ -342,6 +358,10 @@ class UserRole(BaseModel):
         related_name='roles_granted'
     )
     granted_at = models.DateTimeField(auto_now_add=True)
+
+<Note>
+**Temporary Roles**: Role assignments can have expiration dates, perfect for temporary contractors, trial periods, or time-limited elevated access.
+</Note>
 
     # Expiration (for temporary roles)
     expires_at = models.DateTimeField(
@@ -1080,6 +1100,10 @@ class PermissionService:
     Service for checking and managing permissions.
     """
 
+<Info>
+**Permission Resolution**: The system collects permissions from all active roles assigned to a user, including inherited permissions, and caches the result for fast lookups.
+</Info>
+
     @staticmethod
     def get_user_permissions(
         user: User,
@@ -1170,6 +1194,10 @@ class PermissionService:
         # Check for exact permission
         if permission in permissions:
             return True
+
+<Note>
+**Wildcard Permissions**: The system supports wildcards like `members.*` (all member permissions) or `*.*` (superuser). This simplifies role configuration for broad access.
+</Note>
 
         # Check for wildcard permission (e.g., members.* matches members.create)
         resource = permission.rsplit('.', 1)[0]

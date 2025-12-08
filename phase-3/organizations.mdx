@@ -57,6 +57,10 @@ class OrganizationsConfig(AppConfig):
         import apps.organizations.signals  # noqa
 ```
 
+<Note>
+**Organizations Model**: This is the core tenant entity. Each organization has its own isolated data, members, teams, and billing. The slug field provides user-friendly URLs.
+</Note>
+
 ### `apps/organizations/models.py`
 
 ```python
@@ -505,6 +509,10 @@ class OrganizationSettings(BaseModel):
         self.save(update_fields=['custom_settings'])
 ```
 
+<Note>
+**Custom Managers**: These provide reusable query methods like `for_user()` and `is_member()` that encapsulate common business logic and make your code more readable.
+</Note>
+
 ### `apps/organizations/managers.py`
 
 ```python
@@ -655,6 +663,10 @@ class OrganizationMemberManager(models.Manager):
 ---
 
 ## Organizations Serializers
+
+<Info>
+**Serializers**: These handle data validation, transformation between JSON and Python objects, and provide a clean API interface. They also control what fields are exposed in API responses.
+</Info>
 
 ### `apps/organizations/serializers.py`
 
