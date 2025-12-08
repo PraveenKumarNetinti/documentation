@@ -348,6 +348,10 @@ class WebhookService:
         # Generate signature
         signature = WebhookService.sign_payload(payload_str, webhook.secret)
         
+<Note>
+**Webhook Headers**: Each delivery includes metadata headers: signature for verification, event type for routing, delivery ID for idempotency, and attempt number for retry tracking.
+</Note>
+
         # Prepare headers
         headers = {
             'Content-Type': 'application/json',
