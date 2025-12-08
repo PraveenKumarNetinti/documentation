@@ -359,6 +359,10 @@ class UserRole(BaseModel):
     )
     granted_at = models.DateTimeField(auto_now_add=True)
 
+<Note>
+**Temporary Roles**: Role assignments can have expiration dates, perfect for temporary contractors, trial periods, or time-limited elevated access.
+</Note>
+
     # Expiration (for temporary roles)
     expires_at = models.DateTimeField(
         null=True,
