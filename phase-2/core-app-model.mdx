@@ -302,6 +302,10 @@ class MetadataMixin(models.Model):
         return self.metadata.get(key, default)
 ```
 
+<Warning>
+**Tenant Context Middleware**: This is critical for multi-tenancy. It sets PostgreSQL session variables that enforce Row-Level Security policies.
+</Warning>
+
 ### `apps/core/middleware.py`
 
 ```python
