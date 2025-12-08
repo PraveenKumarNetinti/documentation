@@ -55,14 +55,11 @@
               "phase-5/audit-logging",
               "phase-5/notifications",
               "phase-5/product-registry",
-              "phase-5/webhooks"
+              "phase-5/webhooks",
+              "phase-5/finan-configuration"
             ]
           }
         ]
-      },
-      {
-        "tab": "API reference",
-        "groups": []
       }
     ],
     "global": {
