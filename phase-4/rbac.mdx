@@ -1195,6 +1195,10 @@ class PermissionService:
         if permission in permissions:
             return True
 
+<Note>
+**Wildcard Permissions**: The system supports wildcards like `members.*` (all member permissions) or `*.*` (superuser). This simplifies role configuration for broad access.
+</Note>
+
         # Check for wildcard permission (e.g., members.* matches members.create)
         resource = permission.rsplit('.', 1)[0]
         if f"{resource}.*" in permissions:
