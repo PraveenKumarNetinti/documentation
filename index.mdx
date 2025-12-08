@@ -366,6 +366,10 @@ CREATE POLICY user_access ON organization_members
 
 #### Token Architecture
 
+<Info>
+Tokens are designed with security best practices: short-lived access tokens (15 min), long-lived refresh tokens (30 days) with rotation, and token family tracking to detect reuse attacks.
+</Info>
+
 **JWT Token Structure**:
 ```json
 {
