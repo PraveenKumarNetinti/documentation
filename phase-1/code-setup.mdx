@@ -739,6 +739,8 @@ __all__ = ('celery_app',)  # Export celery_app
 
 ### `config/celery.py`
 
+Celery configuration for async task processing and scheduled jobs.
+
 ```python
 import os
 from celery import Celery
@@ -747,29 +749,30 @@ from celery.schedules import crontab
 # Set default Django settings module
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.development')
 
-app = Celery('saas_platform')
+app = Celery('saas_platform')  # Create Celery app
 
 # Using a string here means the worker doesn't have to serialize
 # the configuration object to child processes.
-app.config_from_object('django.conf:settings', namespace='CELERY')
+app.config_from_object('django.conf:settings', namespace='CELERY')  # Load config from Django settings
 
 # Load task modules from all registered Django apps.
-app.autodiscover_tasks()
+app.autodiscover_tasks()  # Auto-discover tasks.py in each app
 
-# Celery Beat schedule
+# Celery Beat schedule - periodic tasks
 app.conf.beat_schedule = {
-    'cleanup-expired-invitations': {
+    'cleanup-expired-invitations': {  # Clean up old invitations
         'task': 'apps.invitations.tasks.cleanup_expired_invitations',
-        'schedule': crontab(hour=2, minute=0),  # 2 AM daily
+        'schedule': crontab(hour=2, minute=0),  # Run at 2 AM daily
     },
-    'cleanup-expired-sessions': {
+    'cleanup-expired-sessions': {  # Clean up old sessions
         'task': 'apps.authentication.tasks.cleanup_expired_sessions',
-        'schedule': crontab(hour=3, minute=0),  # 3 AM daily
+        'schedule': crontab(hour=3, minute=0),  # Run at 3 AM daily
     },
 }
 
 @app.task(bind=True, ignore_result=True)
 def debug_task(self):
+    """Debug task to test Celery is working"""
     print(f'Request: {self.request!r}')
 ```
 
