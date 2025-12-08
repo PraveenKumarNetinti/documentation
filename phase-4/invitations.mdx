@@ -8,7 +8,15 @@ sidebarTitle: "Invitations"
 The invitation system allows organization admins to invite new users via email. Invitations are secure, time-limited, and can assign roles and teams automatically.
 </Info>
 
+<Warning>
+**Security**: Invitation tokens are cryptographically secure, single-use, and time-limited (7 days default). They're hashed in the database to prevent token leakage if the database is compromised.
+</Warning>
+
 ## Invitations App Structure
+
+<Info>
+The invitation system allows organization admins to invite new users via email. Invitations are secure, time-limited, and can assign roles and teams automatically upon acceptance.
+</Info>
 
 ```
 apps/invitations/
