@@ -778,6 +778,8 @@ def debug_task(self):
 
 ### `config/urls.py`
 
+Main URL configuration routing requests to different apps.
+
 ```python
 from django.contrib import admin
 from django.urls import path, include
@@ -790,33 +792,35 @@ from drf_spectacular.views import (
 )
 
 urlpatterns = [
-    # Admin
+    # Admin - Django admin interface
     path('admin/', admin.site.urls),
     
-    # API Documentation
-    path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
-    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
-    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
+    # API Documentation - OpenAPI/Swagger docs
+    path('api/schema/', SpectacularAPIView.as_view(), name='schema'),  # OpenAPI schema
+    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),  # Swagger UI
+    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),  # ReDoc UI
     
-    # API v1
-    path('api/v1/auth/', include('apps.authentication.urls')),
-    path('api/v1/', include('apps.organizations.urls')),
-    path('api/v1/', include('apps.teams.urls')),
-    path('api/v1/', include('apps.invitations.urls')),
-    path('api/v1/', include('apps.rbac.urls')),
-    path('api/v1/', include('apps.notifications.urls')),
-    path('api/v1/', include('apps.audit.urls')),
+    # API v1 - main API endpoints
+    path('api/v1/auth/', include('apps.authentication.urls')),  # Authentication endpoints
+    path('api/v1/', include('apps.organizations.urls')),  # Organization endpoints
+    path('api/v1/', include('apps.teams.urls')),  # Team endpoints
+    path('api/v1/', include('apps.invitations.urls')),  # Invitation endpoints
+    path('api/v1/', include('apps.rbac.urls')),  # RBAC endpoints
+    path('api/v1/', include('apps.notifications.urls')),  # Notification endpoints
+    path('api/v1/', include('apps.audit.urls')),  # Audit log endpoints
     
-    # Health check
+    # Health check - for monitoring/load balancers
     path('health/', include('health_check.urls')),
 ]
 
+# Development-only URLs
 if settings.DEBUG:
     import debug_toolbar
     urlpatterns = [
-        path('__debug__/', include(debug_toolbar.urls)),
+        path('__debug__/', include(debug_toolbar.urls)),  # Debug toolbar
     ] + urlpatterns
     
+    # Serve media and static files in development
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
 ```
