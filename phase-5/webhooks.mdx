@@ -433,6 +433,10 @@ class WebhookService:
             delivery.save()
             return False
 
+<Note>
+**Event Broadcasting**: When you trigger an event, the system finds all active webhooks subscribed to that event type and queues deliveries asynchronously via Celery for non-blocking execution.
+</Note>
+
     @staticmethod
     def trigger_event(
         organization: Organization,
