@@ -161,6 +161,10 @@ class Webhook(BaseModel):
         ])
 
 
+<Info>
+**Delivery Tracking**: Every webhook delivery is logged with full request/response details, timing metrics, and error messages. This makes debugging integration issues straightforward.
+</Info>
+
 class WebhookDelivery(BaseModel):
     """
     Record of webhook delivery attempts.
