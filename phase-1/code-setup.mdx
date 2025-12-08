@@ -683,20 +683,22 @@ LOGGING['handlers']['file']['filename'] = '/var/log/django/saas_platform.log'  #
 
 ### `config/settings/test.py`
 
+Test settings optimized for speed with in-memory database and synchronous tasks.
+
 ```python
 from .base import *
 
-DEBUG = False
+DEBUG = False  # Disable debug mode in tests
 
-# Use in-memory database for tests
+# Use in-memory database for tests - much faster than PostgreSQL
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': ':memory:',
+        'ENGINE': 'django.db.backends.sqlite3',  # SQLite in memory
+        'NAME': ':memory:',  # Store in RAM
     }
 }
 
-# Disable migrations for faster tests
+# Disable migrations for faster tests - create tables directly from models
 class DisableMigrations:
     def __contains__(self, item):
         return True
@@ -704,18 +706,18 @@ class DisableMigrations:
     def __getitem__(self, item):
         return None
 
-MIGRATION_MODULES = DisableMigrations()
+MIGRATION_MODULES = DisableMigrations()  # Skip migrations
 
-# Fast password hasher for tests
+# Fast password hasher for tests - MD5 is insecure but fast for testing
 PASSWORD_HASHERS = [
     'django.contrib.auth.hashers.MD5PasswordHasher',
 ]
 
-# Celery - run tasks synchronously
-CELERY_TASK_ALWAYS_EAGER = True
-CELERY_TASK_EAGER_PROPAGATES = True
+# Celery - run tasks synchronously in tests (no separate worker needed)
+CELERY_TASK_ALWAYS_EAGER = True  # Execute tasks immediately
+CELERY_TASK_EAGER_PROPAGATES = True  # Propagate exceptions
 
-# Email
+# Email - store emails in memory for testing
 EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
 ```
 
