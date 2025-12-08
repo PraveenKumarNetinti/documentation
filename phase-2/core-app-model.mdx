@@ -864,6 +864,10 @@ from apps.core.utils import generate_random_token, generate_secure_hash
 from .managers import UserManager
 
 
+<Warning>
+**Custom User Model**: This must be set before your first migration. Changing it later requires complex data migrations.
+</Warning>
+
 class User(AbstractBaseUser, PermissionsMixin, BaseModel):
     """
     Custom User model with email as username.
