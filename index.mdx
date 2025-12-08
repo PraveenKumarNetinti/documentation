@@ -925,6 +925,10 @@ Blue-green deployments enable zero-downtime releases and instant rollbacks if is
 
 #### Database Migrations
 
+<Warning>
+Always use the expand-migrate-contract pattern for zero-downtime migrations. Never drop columns or tables immediately.
+</Warning>
+
 **Zero-Downtime Strategy**:
 1. **Expand Phase**: Add new columns/tables (nullable)
 2. **Migrate Phase**: Dual-write to old and new schema
