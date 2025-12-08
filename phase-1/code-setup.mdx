@@ -611,72 +611,74 @@ CSRF_COOKIE_SECURE = False  # Allow CSRF cookies over HTTP
 
 ### `config/settings/production.py`
 
+Production settings with maximum security and monitoring enabled.
+
 ```python
 from .base import *
 
-DEBUG = False
+DEBUG = False  # Never enable debug in production
 
-ALLOWED_HOSTS = env.list('ALLOWED_HOSTS')
+ALLOWED_HOSTS = env.list('ALLOWED_HOSTS')  # Only allow specific domains
 
-# Security
-SECURE_SSL_REDIRECT = True
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-SESSION_COOKIE_SECURE = True
-CSRF_COOKIE_SECURE = True
-SECURE_HSTS_SECONDS = 31536000
-SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-SECURE_HSTS_PRELOAD = True
-SECURE_CONTENT_TYPE_NOSNIFF = True
-SECURE_BROWSER_XSS_FILTER = True
-X_FRAME_OPTIONS = 'DENY'
+# Security - enforce HTTPS and secure cookies
+SECURE_SSL_REDIRECT = True  # Redirect all HTTP to HTTPS
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')  # Trust proxy headers
+SESSION_COOKIE_SECURE = True  # Only send session cookie over HTTPS
+CSRF_COOKIE_SECURE = True  # Only send CSRF cookie over HTTPS
+SECURE_HSTS_SECONDS = 31536000  # Tell browsers to use HTTPS for 1 year
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True  # Apply HSTS to subdomains
+SECURE_HSTS_PRELOAD = True  # Allow inclusion in browser HSTS preload list
+SECURE_CONTENT_TYPE_NOSNIFF = True  # Prevent MIME type sniffing
+SECURE_BROWSER_XSS_FILTER = True  # Enable XSS filter
+X_FRAME_OPTIONS = 'DENY'  # Prevent clickjacking
 
-# Session
-SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = 'Strict'
+# Session - secure session cookies
+SESSION_COOKIE_HTTPONLY = True  # Prevent JavaScript access to session cookie
+SESSION_COOKIE_SAMESITE = 'Strict'  # Prevent CSRF via cookies
 SESSION_COOKIE_AGE = 86400  # 24 hours
 
-# CSRF
-CSRF_COOKIE_HTTPONLY = True
-CSRF_COOKIE_SAMESITE = 'Strict'
+# CSRF - secure CSRF cookies
+CSRF_COOKIE_HTTPONLY = True  # Prevent JavaScript access to CSRF cookie
+CSRF_COOKIE_SAMESITE = 'Strict'  # Prevent CSRF attacks
 
-# Sentry
+# Sentry - error tracking and performance monitoring
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
 from sentry_sdk.integrations.celery import CeleryIntegration
 
 sentry_sdk.init(
-    dsn=env('SENTRY_DSN', default=''),
+    dsn=env('SENTRY_DSN', default=''),  # Sentry project URL
     integrations=[
-        DjangoIntegration(),
-        CeleryIntegration(),
+        DjangoIntegration(),  # Django integration
+        CeleryIntegration(),  # Celery integration
     ],
-    traces_sample_rate=0.1,
-    send_default_pii=False,
-    environment='production',
+    traces_sample_rate=0.1,  # Sample 10% of transactions for performance monitoring
+    send_default_pii=False,  # Don't send personally identifiable information
+    environment='production',  # Environment name
 )
 
-# Storage (AWS S3)
+# Storage (AWS S3) - use S3 for static and media files
 if env('AWS_ACCESS_KEY_ID', default=None):
     AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID')
     AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY')
     AWS_STORAGE_BUCKET_NAME = env('AWS_STORAGE_BUCKET_NAME')
     AWS_S3_REGION_NAME = env('AWS_S3_REGION_NAME', default='us-east-1')
     AWS_S3_CUSTOM_DOMAIN = f'{AWS_STORAGE_BUCKET_NAME}.s3.amazonaws.com'
-    AWS_DEFAULT_ACL = 'private'
+    AWS_DEFAULT_ACL = 'private'  # Files are private by default
     AWS_S3_OBJECT_PARAMETERS = {
-        'CacheControl': 'max-age=86400',
+        'CacheControl': 'max-age=86400',  # Cache for 24 hours
     }
     
-    # Static files
+    # Static files - serve from S3
     STATICFILES_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
     STATIC_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/static/'
     
-    # Media files
+    # Media files - serve from S3
     DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
     MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/media/'
 
 # Logging to file in production
-LOGGING['handlers']['file']['filename'] = '/var/log/django/saas_platform.log'
+LOGGING['handlers']['file']['filename'] = '/var/log/django/saas_platform.log'  # Production log path
 ```
 
 ### `config/settings/test.py`
