@@ -577,30 +577,32 @@ MAGIC_LINK_EXPIRY_MINUTES = 15  # Magic links expire after 15 minutes
 
 ### `config/settings/development.py`
 
+Development-specific settings with debugging tools and relaxed security.
+
 ```python
 from .base import *
 
-DEBUG = True
+DEBUG = True  # Enable debug mode
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']  # Allow local access
 
-# Debug toolbar
+# Debug toolbar - adds debug panel to pages
 INSTALLED_APPS += [
-    'debug_toolbar',
-    'django_extensions',
+    'debug_toolbar',  # Debug toolbar with SQL queries, cache hits, etc.
+    'django_extensions',  # Extra management commands
 ]
 
-MIDDLEWARE = ['debug_toolbar.middleware.DebugToolbarMiddleware'] + MIDDLEWARE
+MIDDLEWARE = ['debug_toolbar.middleware.DebugToolbarMiddleware'] + MIDDLEWARE  # Add debug toolbar middleware
 
-INTERNAL_IPS = ['127.0.0.1']
+INTERNAL_IPS = ['127.0.0.1']  # IPs that can see debug toolbar
 
-# Email backend for development
+# Email backend for development - print emails to console
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
-# Disable some security features for development
-SECURE_SSL_REDIRECT = False
-SESSION_COOKIE_SECURE = False
-CSRF_COOKIE_SECURE = False
+# Disable some security features for development (never do this in production!)
+SECURE_SSL_REDIRECT = False  # Don't force HTTPS
+SESSION_COOKIE_SECURE = False  # Allow cookies over HTTP
+CSRF_COOKIE_SECURE = False  # Allow CSRF cookies over HTTP
 ```
 
 <Warning>
