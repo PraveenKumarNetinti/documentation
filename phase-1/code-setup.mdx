@@ -391,25 +391,25 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # Internationalization
-LANGUAGE_CODE = 'en-us'
-TIME_ZONE = 'UTC'
-USE_I18N = True
-USE_TZ = True
+LANGUAGE_CODE = 'en-us'  # Default language
+TIME_ZONE = 'UTC'  # Store all times in UTC
+USE_I18N = True  # Enable internationalization
+USE_TZ = True  # Use timezone-aware datetimes
 
 # Static files (CSS, JavaScript, Images)
-STATIC_URL = '/static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'
-STATICFILES_DIRS = [BASE_DIR / 'static']
+STATIC_URL = '/static/'  # URL prefix for static files
+STATIC_ROOT = BASE_DIR / 'staticfiles'  # Where collectstatic puts files
+STATICFILES_DIRS = [BASE_DIR / 'static']  # Additional static file locations
 
-# Media files
-MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# Media files (user uploads)
+MEDIA_URL = '/media/'  # URL prefix for media files
+MEDIA_ROOT = BASE_DIR / 'media'  # Where uploaded files are stored
 
 # Default primary key field type
-DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'  # Use BigInt for primary keys
 
 # Sites framework
-SITE_ID = 1
+SITE_ID = 1  # Required for django.contrib.sites
 
 # REST Framework
 REST_FRAMEWORK = {
