@@ -247,6 +247,8 @@ DOMAIN=localhost:8000  # Your application domain
 
 ### `config/settings/base.py`
 
+Base settings shared across all environments. Contains core Django configuration.
+
 ```python
 """
 Base settings for SaaS Platform project.
@@ -255,12 +257,12 @@ import os
 from pathlib import Path
 import environ
 
-# Build paths
+# Build paths - root directory of the project
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-# Environment variables
+# Environment variables - load from .env file
 env = environ.Env(
-    DEBUG=(bool, False)
+    DEBUG=(bool, False)  # Default DEBUG to False for safety
 )
 environ.Env.read_env(os.path.join(BASE_DIR, '.env'))
 
