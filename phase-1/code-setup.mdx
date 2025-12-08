@@ -352,6 +352,10 @@ DATABASES = {
     'default': env.db('DATABASE_URL', default='postgresql://localhost/saas_platform')
 }
 
+<Note>
+**Custom User Model**: Set this before running your first migration. Changing it later is extremely difficult.
+</Note>
+
 # Custom User Model
 AUTH_USER_MODEL = 'authentication.User'
 
