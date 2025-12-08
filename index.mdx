@@ -759,6 +759,10 @@ Security is implemented in multiple layers. If one layer is compromised, others 
 
 ### Database Scaling Strategy
 
+<Info>
+Start simple with a single database, then scale horizontally as needed. Premature optimization adds complexity without benefits.
+</Info>
+
 #### 1. **Read/Write Splitting**
 
 - **Write Operations**: Route to primary
