@@ -325,18 +325,18 @@ LOCAL_APPS = [
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS  # Combine all apps
 
 MIDDLEWARE = [
-    'django.middleware.security.SecurityMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'django.middleware.security.SecurityMiddleware',  # Security enhancements
+    'corsheaders.middleware.CorsMiddleware',  # Handle CORS headers
+    'django.contrib.sessions.middleware.SessionMiddleware',  # Session management
+    'django.middleware.common.CommonMiddleware',  # Common utilities
+    'django.middleware.csrf.CsrfViewMiddleware',  # CSRF protection
+    'django.contrib.auth.middleware.AuthenticationMiddleware',  # User authentication
+    'django.contrib.messages.middleware.MessageMiddleware',  # Flash messages
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',  # Clickjacking protection
     
     # Custom middleware
-    'apps.core.middleware.TenantContextMiddleware',
-    'apps.audit.middleware.AuditMiddleware',
+    'apps.core.middleware.TenantContextMiddleware',  # Set tenant context for RLS
+    'apps.audit.middleware.AuditMiddleware',  # Log all requests for audit
 ]
 
 ROOT_URLCONF = 'config.urls'
