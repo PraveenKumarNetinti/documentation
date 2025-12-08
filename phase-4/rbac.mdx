@@ -304,6 +304,10 @@ class Role(BaseModel):
         return permission_codename in self.get_all_permission_codenames()
 
 
+<Warning>
+**Permission Caching**: User permissions are cached for 5 minutes to improve performance. The cache is automatically cleared when roles or assignments change.
+</Warning>
+
 class UserRole(BaseModel):
     """
     Assignment of roles to users within organizations.
