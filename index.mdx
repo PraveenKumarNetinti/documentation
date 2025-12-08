@@ -1,97 +1,1569 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Multi-Tenant SaaS Platform Architecture"
+description: "Multi-tenant SaaS platform that can host multiple products. Each product can have its own billing, members, roles and settings"
 ---
 
-## Setting up
+# Multi-Tenant SaaS Platform Architecture
 
-Get your documentation site up and running in minutes.
+## 🏗️ High-Level Architecture Overview
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+### Architecture Layers
 
-## Make it yours
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    CLIENT LAYER                              │
+│  Web App │ Mobile App │ CLI │ Third-party Integrations      │
+└─────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                    API GATEWAY LAYER                         │
+│  • Rate Limiting  • Request Routing  • Load Balancing       │
+│  • SSL Termination  • DDoS Protection  • API Versioning     │
+└─────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                 AUTHENTICATION SERVICE                       │
+│  • Multi-strategy Auth  • Session Management                │
+│  • Token Service  • SSO Gateway                             │
+└─────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                   APPLICATION LAYER                          │
+├──────────────┬──────────────┬──────────────┬────────────────┤
+│ Organization │ User Service │ Team Service │ RBAC Service   │
+│   Service    │              │              │                │
+├──────────────┼──────────────┼──────────────┼────────────────┤
+│ Product      │ Billing      │ Notification │ Audit Service  │
+│ Registry     │ Service      │ Service      │                │
+├──────────────┴──────────────┴──────────────┴────────────────┤
+│              PRODUCT PLUGIN FRAMEWORK                        │
+│  Product A  │  Product B  │  Product C  │  Product N       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                     DATA LAYER                               │
+├──────────────┬──────────────┬──────────────┬────────────────┤
+│ Primary DB   │ Read Replica │ Cache Layer  │ Search Index   │
+│ (PostgreSQL) │              │ (Redis)      │ (Elasticsearch)│
+├──────────────┼──────────────┼──────────────┼────────────────┤
+│ Object Store │ Time-Series  │ Message Queue│ Event Store    │
+│ (S3)         │ DB (metrics) │ (RabbitMQ)   │                │
+└─────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                INFRASTRUCTURE LAYER                          │
+│  Kubernetes │ Service Mesh │ Observability │ Secrets Mgmt  │
+└─────────────────────────────────────────────────────────────┘
+```
 
-Design a docs site that looks great and empowers your users.
+---
 
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
+## 🗄️ Data Model & Tenant Isolation Strategy
 
-## Create beautiful pages
+### Tenant Isolation Approach: **Hybrid Model**
 
-Everything you need to create world-class documentation.
+**Rationale**: Use shared database with Row-Level Security (RLS) for most tenants, with ability to segregate premium/enterprise customers to dedicated databases.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+### Core Data Model
 
-## Need inspiration?
+#### 1. **Tenancy & Organization Schema**
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+```
+organizations
+├── id (uuid, primary key)
+├── slug (unique, for URLs)
+├── name
+├── owner_id (user reference)
+├── tier (free/pro/enterprise)
+├── status (active/suspended/churned/trial)
+├── isolation_level (shared/dedicated_schema/dedicated_db)
+├── settings (jsonb - flexible config)
+├── created_at
+├── updated_at
+└── deleted_at (soft delete)
+
+organization_billing
+├── id
+├── organization_id (fk)
+├── billing_email
+├── payment_method_id
+├── subscription_status
+├── billing_provider (stripe/paddle)
+├── external_customer_id
+└── metadata (jsonb)
+
+organization_settings
+├── organization_id (fk)
+├── setting_key
+├── setting_value (jsonb)
+├── is_locked (admin override)
+└── updated_by
+```
+
+#### 2. **User & Identity Schema**
+
+```
+users
+├── id (uuid)
+├── email (unique)
+├── email_verified_at
+├── password_hash (nullable - for social-only)
+├── display_name
+├── avatar_url
+├── timezone
+├── locale
+├── status (active/suspended/deleted)
+├── last_login_at
+├── created_at
+└── metadata (jsonb)
+
+user_identities (for social login)
+├── id
+├── user_id (fk)
+├── provider (google/github/okta/saml)
+├── provider_user_id
+├── provider_data (jsonb)
+├── verified
+└── created_at
+
+auth_sessions
+├── id (uuid)
+├── user_id (fk)
+├── token_hash
+├── device_fingerprint
+├── ip_address
+├── user_agent
+├── last_activity_at
+├── expires_at
+└── created_at
+
+refresh_tokens
+├── id
+├── user_id (fk)
+├── token_hash
+├── family_id (for rotation detection)
+├── parent_token_id (track token lineage)
+├── expires_at
+├── revoked_at
+└── created_at
+```
+
+#### 3. **Membership & Access Schema**
+
+```
+organization_members
+├── id
+├── organization_id (fk)
+├── user_id (fk)
+├── status (active/invited/suspended)
+├── joined_at
+├── invited_by (user_id)
+├── created_at
+└── UNIQUE(organization_id, user_id)
+
+teams
+├── id
+├── organization_id (fk)
+├── name
+├── description
+├── parent_team_id (for hierarchy)
+├── settings (jsonb)
+└── created_at
+
+team_members
+├── team_id (fk)
+├── user_id (fk)
+├── role_in_team
+└── UNIQUE(team_id, user_id)
+```
+
+#### 4. **RBAC Schema (Hierarchical & Extensible)**
+
+```
+roles
+├── id
+├── organization_id (fk, nullable - null for system roles)
+├── product_id (fk, nullable - null for org-wide roles)
+├── name
+├── slug (owner/admin/member/custom-role)
+├── description
+├── is_system_role (non-deletable)
+├── inherits_from (role_id - for inheritance)
+├── priority (for conflict resolution)
+└── created_at
+
+permissions
+├── id
+├── resource (organization/user/team/billing/product)
+├── action (create/read/update/delete/manage)
+├── scope (org/product/team/self)
+├── description
+└── is_system_permission
+
+role_permissions
+├── role_id (fk)
+├── permission_id (fk)
+├── conditions (jsonb - attribute-based access control)
+└── UNIQUE(role_id, permission_id)
+
+user_roles
+├── user_id (fk)
+├── role_id (fk)
+├── organization_id (fk)
+├── product_id (fk, nullable)
+├── resource_id (nullable - for resource-specific roles)
+├── granted_by (user_id)
+├── granted_at
+├── expires_at (nullable)
+└── UNIQUE(user_id, role_id, organization_id, product_id)
+```
+
+#### 5. **Invitation Schema**
+
+```
+invitations
+├── id (uuid)
+├── organization_id (fk)
+├── product_id (fk, nullable)
+├── email
+├── invited_by (user_id)
+├── role_id (fk)
+├── token_hash
+├── status (pending/accepted/declined/cancelled/expired)
+├── expires_at
+├── accepted_at
+├── metadata (jsonb - custom fields)
+└── created_at
+```
+
+#### 6. **Product Registry Schema**
+
+```
+products
+├── id
+├── slug (unique - billing/analytics/crm)
+├── name
+├── description
+├── version
+├── status (active/maintenance/deprecated)
+├── requires_separate_billing
+├── has_custom_roles
+├── has_custom_settings
+├── plugin_entrypoint
+└── created_at
+
+organization_products (which products org has access to)
+├── organization_id (fk)
+├── product_id (fk)
+├── status (active/trial/suspended)
+├── enabled_at
+├── trial_ends_at
+├── settings (jsonb - product-specific)
+└── UNIQUE(organization_id, product_id)
+
+product_members (product-specific membership)
+├── id
+├── organization_id (fk)
+├── product_id (fk)
+├── user_id (fk)
+├── status (active/suspended)
+├── access_level (full/limited)
+└── UNIQUE(organization_id, product_id, user_id)
+
+product_billing (separate billing per product)
+├── id
+├── organization_id (fk)
+├── product_id (fk)
+├── billing_email (can differ from org billing)
+├── subscription_id
+├── pricing_plan_id
+└── metadata (jsonb)
+```
+
+#### 7. **Audit & Activity Schema**
+
+```
+audit_logs
+├── id
+├── organization_id (fk, indexed)
+├── product_id (fk, nullable)
+├── user_id (fk, nullable)
+├── action (string - standardized)
+├── resource_type
+├── resource_id
+├── changes (jsonb - before/after)
+├── ip_address
+├── user_agent
+├── timestamp (timestamptz, partitioned)
+└── metadata (jsonb)
+
+activity_feed
+├── id
+├── organization_id (fk)
+├── actor_id (user_id)
+├── action_type
+├── entity_type
+├── entity_id
+├── visibility (public/team/private)
+├── created_at
+└── metadata (jsonb)
+```
+
+### Row-Level Security (RLS) Implementation
+
+**PostgreSQL RLS Policies**:
+
+```sql
+-- Example policy structure
+ALTER TABLE organization_members ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON organization_members
+  USING (organization_id = current_setting('app.current_organization_id')::uuid);
+
+CREATE POLICY user_access ON organization_members
+  USING (user_id = current_setting('app.current_user_id')::uuid OR
+         has_permission(current_setting('app.current_user_id')::uuid, 
+                       organization_id, 'members.read'));
+```
+
+**Context Propagation**: Every request sets session variables for tenant isolation.
+
+---
+
+## 🔐 Authentication & Authorization Architecture
+
+### Authentication Service Design
+
+#### Multi-Strategy Authentication Manager
+
+```
+┌──────────────────────────────────────────┐
+│     Authentication Orchestrator          │
+└──────────────────────────────────────────┘
+                    │
+        ┌───────────┼───────────┐
+        │           │           │
+┌───────▼────┐ ┌───▼──────┐ ┌──▼─────────┐
+│  Password  │ │  Magic   │ │  Social    │
+│  Strategy  │ │  Link    │ │  OAuth     │
+└────────────┘ └──────────┘ └────────────┘
+                    │
+        ┌───────────┼───────────┐
+        │           │           │
+┌───────▼────┐ ┌───▼──────┐ ┌──▼─────────┐
+│    SAML    │ │  API Key │ │   SSO      │
+│  (Future)  │ │          │ │  (Future)  │
+└────────────┘ └──────────┘ └────────────┘
+```
+
+#### Token Architecture
+
+**JWT Token Structure**:
+```json
+{
+  "sub": "user_id",
+  "org": "current_organization_id",
+  "orgs": ["org1", "org2", "org3"],
+  "roles": {
+    "org1": ["role1", "role2"],
+    "product_id": ["role3"]
+  },
+  "permissions": ["cached_permissions_hash"],
+  "session_id": "session_uuid",
+  "type": "access",
+  "exp": 900,
+  "iat": 1234567890
+}
+```
+
+**Token Types**:
+1. **Access Token** (JWT, 15 min): For API/web requests
+2. **Refresh Token** (Opaque, 30 days): Stored in DB, for rotation
+3. **Magic Link Token** (Opaque, 15 min): One-time use
+4. **Invitation Token** (Opaque, 7 days): For accepting invites
+5. **API Key** (Long-lived): For service-to-service
+
+#### Session Management Strategy
+
+**Web (Cookie-based)**:
+- HttpOnly, Secure, SameSite=Strict cookies
+- Session ID stored in Redis with user context
+- Rolling expiration on activity
+- CSRF token for state-changing operations
+
+**Mobile/API (Token-based)**:
+- JWT access token in Authorization header
+- Refresh token stored securely (keychain/keystore)
+- Token rotation on refresh (detect reuse attacks)
+
+**Logout Everywhere**:
+- Increment user's token_version in DB
+- Include version in JWT claims
+- Validate version on each request
+- Clear all sessions from Redis
+
+### Authorization Service Design
+
+#### Permission Evaluation Engine
+
+```
+Request → Extract Context → Load Roles → Resolve Permissions → 
+Evaluate ABAC Rules → Cache Decision → Allow/Deny
+```
+
+**Permission Resolution Algorithm**:
+1. Load user's explicit roles (org-level + product-level)
+2. Traverse role inheritance tree
+3. Collect all permissions from roles
+4. Apply ABAC conditions (attribute-based rules)
+5. Check resource ownership (user owns resource)
+6. Resolve conflicts (deny-by-default, explicit deny wins)
+7. Cache result for request duration
+
+#### RBAC + ABAC Hybrid Model
+
+**Role-Based (RBAC)**:
+- Predefined system roles: Owner, Admin, Member, Viewer
+- Custom roles per organization/product
+- Role inheritance (Admin inherits Member permissions)
+
+**Attribute-Based (ABAC)**:
+- Conditions on permissions: `{"user.team": "resource.team"}`
+- Time-based access: `{"valid_until": "2024-12-31"}`
+- Context-aware: `{"ip_whitelist": ["10.0.0.0/8"]}`
+
+**Example Permission Check**:
+```
+Can user "john" perform "billing.update" on organization "acme"?
+
+1. Load roles: john has "admin" role in "acme"
+2. Admin inherits from "member" role
+3. Admin role has permission "billing.update"
+4. Check ABAC: No conditions
+5. Result: ALLOW
+```
+
+#### Permission Caching Strategy
+
+- **L1 Cache**: In-memory for request duration (context)
+- **L2 Cache**: Redis for user permission set (5 min TTL)
+- **L3 Cache**: Include permission hash in JWT for quick validation
+- **Invalidation**: On role changes, flush user's L2 cache
+
+---
+
+## 🧩 Product Modularity Framework
+
+### Plugin Architecture
+
+```
+┌─────────────────────────────────────────┐
+│        Product Plugin Interface         │
+├─────────────────────────────────────────┤
+│  • onInstall(org)                       │
+│  • onUninstall(org)                     │
+│  • registerRoutes()                     │
+│  • registerPermissions()                │
+│  • registerRoles()                      │
+│  • registerSettings()                   │
+│  • registerBillingPlans()               │
+│  • registerWebhooks()                   │
+│  • getDashboardWidget()                 │
+│  • getSettingsPanel()                   │
+└─────────────────────────────────────────┘
+                  │
+      ┌───────────┼───────────┐
+      │           │           │
+┌─────▼────┐ ┌────▼─────┐ ┌──▼────────┐
+│ Product  │ │ Product  │ │  Product  │
+│    A     │ │    B     │ │     C     │
+└──────────┘ └──────────┘ └───────────┘
+```
+
+### Product Lifecycle Hooks
+
+1. **Installation**:
+   - Create product-specific tables (via migrations)
+   - Register default roles and permissions
+   - Set up billing plan association
+   - Initialize default settings
+   - Send welcome notifications
+
+2. **Configuration**:
+   - Admin configures product settings
+   - Assigns product-specific roles to users
+   - Enables/disables features
+   - Configures integrations
+
+3. **Runtime**:
+   - Request routing to product handlers
+   - Permission checks via unified RBAC
+   - Isolated data access (product-specific tables)
+   - Event publishing to shared event bus
+
+4. **Uninstallation**:
+   - Data export/archival
+   - Cleanup product-specific resources
+   - Revoke product permissions
+   - Cancel product billing
+   - Audit trail
+
+### Product Data Isolation
+
+**Strategy**: Separate schemas per product within shared database
+
+```
+public schema (shared)
+├── organizations
+├── users
+├── organization_members
+└── ...
+
+product_billing schema
+├── invoices
+├── payment_methods
+└── transactions
+
+product_analytics schema
+├── events
+├── dashboards
+└── reports
+
+product_crm schema
+├── contacts
+├── deals
+└── pipelines
+```
+
+**Benefits**:
+- Clear namespace separation
+- Independent migrations per product
+- Simplified access control
+- Easy to extract to separate DB later
+
+### Product Extension Points
+
+1. **API Routes**: `/api/v1/products/{product_slug}/*`
+2. **Webhooks**: Product can subscribe to platform events
+3. **UI Components**: Product provides embeddable widgets
+4. **Billing Integration**: Product defines pricing plans
+5. **Custom Fields**: Extend org/user models via metadata
+6. **Notifications**: Product triggers via notification service
+
+### Product Discovery & Registry
+
+**Product Manifest** (JSON/YAML):
+```json
+{
+  "id": "billing-product",
+  "name": "Billing & Invoicing",
+  "version": "1.0.0",
+  "author": "Platform Team",
+  "requires_platform_version": ">=2.0.0",
+  "permissions": [
+    {"resource": "invoice", "actions": ["create", "read", "update"]},
+    {"resource": "payment", "actions": ["read", "process"]}
+  ],
+  "default_roles": [
+    {
+      "slug": "billing-admin",
+      "permissions": ["invoice.*", "payment.*"]
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "currency": {"type": "string", "default": "USD"},
+      "tax_rate": {"type": "number", "default": 0}
+    }
+  },
+  "billing_plans": [
+    {"name": "basic", "price": 29, "interval": "month"}
+  ],
+  "dependencies": []
+}
+```
+
+---
+
+## 🛡️ Security Architecture
+
+### Defense in Depth Strategy
+
+#### 1. **Network Security**
+
+- **API Gateway**: 
+  - Rate limiting per user/org/IP (tiered)
+  - WAF rules (OWASP Top 10)
+  - DDoS protection
+  - IP whitelisting for enterprise
+
+- **Service Mesh**:
+  - mTLS between services
+  - Zero-trust networking
+  - Service-to-service authentication
+
+#### 2. **Application Security**
+
+- **Input Validation**:
+  - Schema validation on all inputs
+  - Parameterized queries (SQL injection prevention)
+  - Content Security Policy headers
+  - CORS configuration per org
+
+- **Output Encoding**:
+  - XSS prevention via template auto-escaping
+  - JSON encoding for APIs
+  - Sanitization of user-generated content
+
+- **CSRF Protection**:
+  - Double-submit cookie pattern
+  - Synchronized token pattern for web
+  - Origin header validation
+
+#### 3. **Data Security**
+
+- **Encryption at Rest**:
+  - Database encryption (AES-256)
+  - Field-level encryption for PII (email, phone)
+  - Encrypted backups
+
+- **Encryption in Transit**:
+  - TLS 1.3 for all communications
+  - Certificate pinning for mobile apps
+  - HSTS headers
+
+- **Data Masking**:
+  - PII masking in logs
+  - Redaction in audit trails
+  - Anonymization for analytics
+
+- **Secrets Management**:
+  - Vault/AWS Secrets Manager for credentials
+  - Automatic rotation of secrets
+  - No secrets in code/config
+
+#### 4. **Authentication Security**
+
+- **Password Security**:
+  - Argon2id hashing (or bcrypt with high cost)
+  - Minimum entropy requirements
+  - Breach password detection (HaveIBeenPwned API)
+  - Password rotation policies (for compliance)
+
+- **MFA** (future):
+  - TOTP (Google Authenticator)
+  - SMS (with warning about security)
+  - WebAuthn (hardware keys)
+  - Backup codes
+
+- **Session Security**:
+  - Secure token generation (crypto.randomBytes)
+  - Token binding to device/IP (optional)
+  - Automatic session timeout
+  - Concurrent session limits
+
+- **Brute Force Protection**:
+  - Account lockout after N failed attempts
+  - Progressive delays (exponential backoff)
+  - CAPTCHA after threshold
+  - Alert user of suspicious activity
+
+#### 5. **Tenant Isolation Security**
+
+- **Database Level**:
+  - RLS policies enforced
+  - Application cannot bypass RLS
+  - Separate connection pools per tier
+
+- **Application Level**:
+  - Tenant context in all requests
+  - Middleware validates tenant access
+  - No cross-tenant queries possible
+
+- **Testing**:
+  - Automated tenant isolation tests
+  - Penetration testing for cross-tenant access
+  - Regular security audits
+
+#### 6. **Compliance & Privacy**
+
+- **GDPR**:
+  - Data portability (export user data)
+  - Right to deletion (hard delete option)
+  - Consent management
+  - Data processing agreements
+
+- **SOC 2**:
+  - Audit logging for all access
+  - Access control reviews
+  - Encryption standards
+  - Incident response plan
+
+- **PCI DSS** (if handling payments):
+  - No storage of CVV
+  - Tokenization via Stripe/Paddle
+  - Regular vulnerability scans
+
+---
+
+## 📈 Scalability & Performance Strategy
+
+### Horizontal Scaling Architecture
+
+```
+┌─────────────────────────────────────────┐
+│          Load Balancer (L7)             │
+│     (Auto-scaling, Health Checks)       │
+└─────────────────────────────────────────┘
+                    │
+    ┌───────────────┼───────────────┐
+    │               │               │
+┌───▼────┐     ┌────▼────┐     ┌───▼────┐
+│  App   │ ... │   App   │ ... │  App   │
+│ Server │     │ Server  │     │ Server │
+│   1    │     │    N    │     │   N+1  │
+└────────┘     └─────────┘     └────────┘
+    │               │               │
+    └───────────────┼───────────────┘
+                    │
+┌───────────────────▼──────────────────────┐
+│     Database Cluster (Primary/Replicas)  │
+│  Primary (writes) + Read Replicas (N)    │
+└──────────────────────────────────────────┘
+```
+
+### Database Scaling Strategy
+
+#### 1. **Read/Write Splitting**
+
+- **Write Operations**: Route to primary
+- **Read Operations**: Route to replicas (round-robin)
+- **Consistency**: Use primary for read-after-write scenarios
+- **Connection Pooling**: PgBouncer with transaction pooling
+
+#### 2. **Caching Strategy**
+
+**Multi-Layer Cache**:
+
+```
+Request → L1 (App Memory) → L2 (Redis) → L3 (Database)
+```
+
+**Cache Patterns**:
+- **User permissions**: Cache-aside, 5 min TTL
+- **Organization settings**: Write-through, invalidate on update
+- **Session data**: Cached in Redis with sliding expiration
+- **Product metadata**: Cache-aside, 1 hour TTL
+
+**Cache Invalidation**:
+- Event-driven invalidation (on updates)
+- Time-based expiration (fallback)
+- Tag-based invalidation (e.g., "org:123:*")
+
+#### 3. **Database Partitioning**
+
+**Horizontal Partitioning** (Sharding - for massive scale):
+- Shard key: `organization_id`
+- Each shard contains subset of organizations
+- Routing layer determines shard from org_id
+- Cross-shard queries avoided by design
+
+**Vertical Partitioning** (Current approach):
+- Separate schemas per product
+- Hot tables separated (e.g., audit_logs)
+- Archive old data to separate tablespace
+
+**Time-based Partitioning**:
+- `audit_logs` partitioned by month
+- Automatic partition creation
+- Old partitions archived to cold storage
+
+#### 4. **Query Optimization**
+
+- **Indexes**: Strategic indexing on foreign keys, query patterns
+- **Query Analysis**: Regular EXPLAIN ANALYZE on slow queries
+- **Materialized Views**: For complex aggregations
+- **Full-Text Search**: Elasticsearch for product search, not DB
+
+### Asynchronous Processing
+
+#### Job Queue Architecture
+
+```
+API Request → Enqueue Job → Return Immediately
+                    ↓
+            Job Queue (RabbitMQ)
+                    ↓
+        ┌───────────┼───────────┐
+        ↓           ↓           ↓
+    Worker 1    Worker 2    Worker N
+```
+
+**Use Cases**:
+- Email sending (invitations, notifications)
+- PDF generation (invoices, reports)
+- Data exports
+- Webhook deliveries
+- Batch operations (bulk user import)
+
+**Queue Types**:
+- **High Priority**: Transactional emails, critical actions
+- **Normal**: Standard notifications
+- **Low Priority**: Analytics processing, cleanup jobs
+- **Scheduled**: Recurring tasks (billing runs, reminders)
+
+#### Event-Driven Architecture
+
+**Event Bus** (Pub/Sub):
+```
+Service A → Publishes Event → Event Bus → Multiple Subscribers
+                                        ↓
+                            ┌───────────┼───────────┐
+                            ↓           ↓           ↓
+                        Service B   Service C   Product Plugin
+```
+
+**Example Events**:
+- `user.created`
+- `organization.member.added`
+- `invitation.accepted`
+- `product.enabled`
+- `billing.subscription.updated`
+
+**Benefits**:
+- Loose coupling between services
+- Easy to add new products/features
+- Audit trail (event sourcing)
+- Replay capability
+
+### CDN & Static Asset Strategy
+
+- **CDN**: CloudFront/Cloudflare for static assets
+- **Asset Versioning**: Cache-busting via hashes
+- **Image Optimization**: Serve WebP, lazy loading
+- **Edge Caching**: Cache API responses at edge (when appropriate)
+
+### Performance Monitoring
+
+**Metrics to Track**:
+- **Response Time**: P50, P95, P99 per endpoint
+- **Throughput**: Requests per second
+- **Error Rate**: 4xx, 5xx errors
+- **Database Performance**: Query time, connection pool saturation
+- **Cache Hit Rate**: Per cache layer
+- **Job Queue**: Job processing time, queue depth
+
+**Tools**:
+- APM: New Relic / DataDog / Elastic APM
+- Logs: Structured logging to ELK stack
+- Traces: Distributed tracing (OpenTelemetry)
+- Real User Monitoring: For frontend performance
+
+---
+
+## 🚀 Operational Excellence
+
+### Deployment Strategy
+
+#### Blue-Green Deployment
+
+```
+┌──────────┐
+│  Router  │
+└────┬─────┘
+     │
+     ├──→ Blue Environment (v1.0) ──┐
+     │                               │
+     └──→ Green Environment (v1.1) ──┘
+          (switch after validation)
+```
+
+**Process**:
+1. Deploy new version to Green (inactive)
+2. Run smoke tests on Green
+3. Route 1% traffic to Green (canary)
+4. Monitor error rates, metrics
+5. Gradually increase to 100%
+6. Keep Blue as rollback option
+
+#### Database Migrations
+
+**Zero-Downtime Strategy**:
+1. **Expand Phase**: Add new columns/tables (nullable)
+2. **Migrate Phase**: Dual-write to old and new schema
+3. **Backfill Phase**: Background job to migrate old data
+4. **Contract Phase**: Remove old columns/tables (after safe period)
+
+**Migration Governance**:
+- All migrations reversible
+- Tested against production-like data
+- Automated migration testing in CI/CD
+- Rollback plan documented
+
+### Observability
+
+#### Logging Strategy
+
+**Structured Logging** (JSON):
+```json
+{
+  "timestamp": "2024-01-15T10:30:00Z",
+  "level": "info",
+  "service": "auth-service",
+  "trace_id": "abc123",
+  "user_id": "user_456",
+  "organization_id": "org_789",
+  "action": "login",
+  "ip": "192.168.1.1",
+  "duration_ms": 150,
+  "status": "success"
+}
+```
+
+**Log Levels**:
+- **DEBUG**: Development only, verbose
+- **INFO**: Normal operations, state changes
+- **WARN**: Potential issues, degraded performance
+- **ERROR**: Failures, exceptions
+- **FATAL**: System-critical errors
+
+**Retention**:
+- Hot storage: 7 days (fast search)
+- Warm storage: 30 days (slower search)
+- Cold storage: 1 year (compliance, S3)
+
+#### Metrics & Dashboards
+
+**Service-Level Indicators (SLIs)**:
+- **Availability**: Uptime percentage
+- **Latency**: 95th percentile response time
+- **Error Rate**: Percentage of failed requests
+- **Throughput**: Successful requests per second
+
+**Service-Level Objectives (SLOs)**:
+- 99.9% availability (43 min downtime/month)
+- 95% of requests < 200ms
+- Error rate < 0.1%
+
+**Alerting**:
+- Error rate spike (> 1% for 5 min)
+- Latency degradation (P95 > 500ms)
+- Service down (health check fails)
+- Database connection pool exhaustion
+- Disk space < 20%
+
+#### Distributed Tracing
+
+**Trace Context Propagation**:
+- Generate trace_id at API gateway
+- Pass through all services via headers
+- Link logs, metrics to trace_id
+- Visualize request flow in Jaeger/Zipkin
+
+### Disaster Recovery
+
+#### Backup Strategy
+
+**Database Backups**:
+- **Continuous**: WAL archiving for point-in-time recovery
+- **Snapshot**: Daily full backup
+- **Retention**: 30 days hot, 1 year cold
+- **Testing**: Monthly restore test
+
+**Application State**:
+- Infrastructure as Code (Terraform)
+- Configuration in version control
+- Secrets in vault with backup
+
+**Recovery Time Objective (RTO)**: 1 hour
+**Recovery Point Objective (RPO)**: 5 minutes
+
+#### Incident Response
+
+**Incident Severity Levels**:
+- **P0**: Complete outage, data loss risk → Page on-call
+- **P1**: Major feature down → Alert during business hours
+- **P2**: Minor issue, workaround exists → Ticket
+- **P3**: Nice to have, cosmetic → Backlog
+
+**Incident Process**:
+1. **Detect**: Automated alerts or user report
+2. **Acknowledge**: On-call engineer assigned
+3. **Investigate**: Logs, metrics, traces
+4. **Mitigate**: Quick fix or rollback
+5. **Resolve**: Permanent fix
+6. **Postmortem**: Blameless, actionable items
+
+### Multi-Region Strategy (Future)
+
+**Architecture**:
+```
+Region 1 (US-East)          Region 2 (EU-West)
+├── App Servers             ├── App Servers
+├── Database Primary        ├── Database Replica
+├── Redis Cluster           ├── Redis Cluster
+└── Storage (S3)            └── Storage (S3)
+        │                           │
+        └───────────┬───────────────┘
+                    │
+         Global Load Balancer (GeoDNS)
+```
+
+**Data Residency**:
+- Organization chooses primary region
+- Data stored in primary region only
+- Replicate to other regions for DR (encrypted)
+- Comply with GDPR, data sovereignty laws
+
+---
+
+## 🧪 Testing Strategy
+
+### Testing Pyramid
+
+```
+         ┌─────────┐
+         │   E2E   │  (10%)
+         └─────────┘
+       ┌─────────────┐
+       │ Integration │  (20%)
+       └─────────────┘
+    ┌──────────────────┐
+    │   Unit Tests     │  (70%)
+    └──────────────────┘
+```
+
+### Test Types
+
+#### 1. **Unit Tests**
+- Each function/method tested in isolation
+- Mock external dependencies
+- Target: 80% code coverage
+- Fast execution (< 5 seconds)
+
+#### 2. **Integration Tests**
+- Test service interactions
+- Use test database/containers
+- Test authentication flows
+- Test authorization edge cases
+
+#### 3. **Contract Tests**
+- API contracts validated (OpenAPI spec)
+- Ensure backward compatibility
+- Verify product plugin interfaces
+
+#### 4. **Security Tests**
+- **Tenant Isolation**: Automated tests for cross-tenant access
+- **Authentication**: Test all auth flows, token expiry
+- **Authorization**: Test permission combinations
+- **Injection**: SQL, NoSQL, command injection tests
+
+#### 5. **Performance Tests**
+- Load testing (JMeter, k6)
+- Stress testing (find breaking point)
+- Soak testing (stability over time)
+- Chaos engineering (inject failures)
+
+#### 6. **E2E Tests**
+- Critical user journeys (Playwright, Cypress)
+- Signup → invite → accept → access product
+- Org owner → billing → subscription
+
+### CI/CD Pipeline
+
+```
+Commit → Build → Unit Tests → Integration Tests → 
+Security Scan → Build Image → Deploy to Staging → 
+E2E Tests → Manual Approval → Deploy to Production
+```
+
+**Automated Checks**:
+- Linting (ESLint, Pylint)
+- Type checking (TypeScript, mypy)
+- Dependency vulnerabilities (Snyk, Dependabot)
+- License compliance
+- Code quality (SonarQube)
+
+---
+
+## 🌍 API Design
+
+### RESTful API Structure
+
+```
+/api/v1
+├── /auth
+│   ├── POST   /login
+│   ├── POST   /logout
+│   ├── POST   /refresh
+│   ├── POST   /magic-link
+│   └── POST   /verify-magic-link
+│
+├── /users
+│   ├── GET    /me
+│   ├── PATCH  /me
+│   ├── POST   /me/change-password
+│   └── DELETE /me/sessions
+│
+├── /organizations
+│   ├── GET    /
+│   ├── POST   /
+│   ├── GET    /:orgId
+│   ├── PATCH  /:orgId
+│   ├── DELETE /:orgId
+│   │
+│   ├── /members
+│   │   ├── GET    /:orgId/members
+│   │   ├── DELETE /:orgId/members/:userId
+│   │   └── PATCH  /:orgId/members/:userId/role
+│   │
+│   ├── /invitations
+│   │   ├── GET    /:orgId/invitations
+│   │   ├── POST   /:orgId/invitations
+│   │   ├── POST   /:orgId/invitations/:id/resend
+│   │   ├── DELETE /:orgId/invitations/:id
+│   │   ├── POST   /invitations/:token/accept
+│   │   └── POST   /invitations/:token/decline
+│   │
+│   ├── /teams
+│   │   ├── GET    /:orgId/teams
+│   │   ├── POST   /:orgId/teams
+│   │   ├── GET    /:orgId/teams/:teamId
+│   │   ├── PATCH  /:orgId/teams/:teamId
+│   │   ├── DELETE /:orgId/teams/:teamId
+│   │   ├── POST   /:orgId/teams/:teamId/members
+│   │   └── DELETE /:orgId/teams/:teamId/members/:userId
+│   │
+│   ├── /roles
+│   │   ├── GET    /:orgId/roles
+│   │   ├── POST   /:orgId/roles
+│   │   ├── GET    /:orgId/roles/:roleId
+│   │   ├── PATCH  /:orgId/roles/:roleId
+│   │   └── DELETE /:orgId/roles/:roleId
+│   │
+│   ├── /billing
+│   │   ├── GET    /:orgId/billing
+│   │   ├── PATCH  /:orgId/billing
+│   │   ├── POST   /:orgId/billing/subscribe
+│   │   └── POST   /:orgId/billing/cancel
+│   │
+│   └── /products
+│       ├── GET    /:orgId/products
+│       ├── POST   /:orgId/products/:productId/enable
+│       ├── DELETE /:orgId/products/:productId/disable
+│       └── PATCH  /:orgId/products/:productId/settings
+│
+└── /products/:productSlug
+    └── (product-specific routes)
+```
+
+### API Versioning Strategy
+
+- **URL Versioning**: `/api/v1`, `/api/v2`
+- **Deprecation**: Mark old versions deprecated, sunset date
+- **Backward Compatibility**: 6-month overlap for migrations
+- **Changelog**: Document breaking changes
+
+### API Standards
+
+- **Pagination**: Cursor-based for scalability
+- **Filtering**: `?filter[status]=active&filter[tier]=pro`
+- **Sorting**: `?sort=-created_at` (- for descending)
+- **Field Selection**: `?fields=id,name,email` (reduce payload)
+- **Expansion**: `?expand=organization,teams` (avoid N+1)
+
+**Response Format**:
+```json
+{
+  "data": { ... },
+  "meta": {
+    "cursor": "next_page_token",
+    "total": 150
+  },
+  "errors": [ ... ] // if any
+}
+```
+
+**Error Format**:
+```json
+{
+  "errors": [
+    {
+      "code": "PERMISSION_DENIED",
+      "message": "You don't have permission to perform this action",
+      "field": "role_id",
+      "details": { ... }
+    }
+  ]
+}
+```
+
+### Rate Limiting
+
+**Strategy**: Token bucket algorithm
+
+**Tiers**:
+- Free: 100 req/min per org
+- Pro: 1,000 req/min per org
+- Enterprise: Custom limits
+
+**Headers**:
+```
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 950
+X-RateLimit-Reset: 1640000000
+```
+
+---
+
+## 📊 Billing & Subscription Architecture
+
+### Billing Service Design
+
+```
+┌──────────────────────────────────────┐
+│       Billing Orchestrator           │
+└──────────────────────────────────────┘
+           │
+    ┌──────┴──────┐
+    │             │
+┌───▼────┐   ┌────▼────┐
+│ Stripe │   │ Paddle  │  (Pluggable providers)
+│Provider│   │Provider │
+└────────┘   └─────────┘
+```
+
+### Billing Models
+
+#### 1. **Organization-Level Billing**
+- **Seat-based**: $10/user/month
+- **Tiered**: Free (3 users), Pro (unlimited, $29/mo), Enterprise (custom)
+- **Usage-based**: API calls, storage, compute
+
+#### 2. **Product-Level Billing**
+- Each product can have separate subscription
+- Bundle pricing: Discount for multiple products
+- Add-on pricing: Extra features within product
+
+### Subscription Lifecycle
+
+```
+Trial → Active → Past Due → Suspended → Cancelled
+  ↓        ↓         ↓          ↓
+  └────────┴─────────┴──────────┴──→ Churned
+```
+
+**State Transitions**:
+- **Trial**: 14 days, no credit card required
+- **Active**: Payment successful, full access
+- **Past Due**: Payment failed, grace period (3 days)
+- **Suspended**: Grace period expired, limited access
+- **Cancelled**: User cancelled, access until period end
+- **Churned**: Subscription ended, read-only mode
+
+### Webhook Handling
+
+**Provider Webhooks** (Stripe/Paddle):
+- `payment_succeeded` → Activate subscription
+- `payment_failed` → Mark as past due, send email
+- `subscription_cancelled` → Schedule cancellation
+- `subscription_updated` → Update plan/pricing
+
+**Webhook Processing**:
+1. Validate webhook signature
+2. Idempotency check (dedupe)
+3. Store event in database
+4. Enqueue processing job
+5. Return 200 OK immediately
+6. Process asynchronously
+7. Publish internal event
+
+### Invoicing
+
+**Invoice Generation**:
+- Automatic monthly/annual billing
+- Pro-rated charges for mid-cycle changes
+- PDF generation for records
+- Email delivery to billing email
+
+**Tax Handling**:
+- Integrate with tax calculation service (TaxJar, Avalara)
+- Collect tax ID for businesses
+- Apply reverse charge for EU B2B
+
+### Usage Tracking
+
+**Metering Service**:
+- Track API calls, storage, compute per org
+- Aggregate hourly → daily → monthly
+- Billing runs use aggregated data
+- Real-time usage visible in dashboard
+
+**Data Structure**:
+```
+usage_events
+├── organization_id
+├── product_id
+├── metric (api_calls, storage_gb)
+├── quantity
+├── timestamp (partitioned)
+└── metadata (endpoint, user, etc.)
+```
+
+---
+
+## 🔔 Notification System
+
+### Multi-Channel Notifications
+
+```
+Event → Notification Service → User Preferences → Delivery
+                                       ↓
+                    ┌──────────────────┼──────────────────┐
+                    ↓                  ↓                  ↓
+                Email             In-App            Webhook
+              (SendGrid)        (WebSocket)      (Customer URL)
+```
+
+### Notification Types
+
+1. **Transactional**: Invitation, password reset (always sent)
+2. **System**: Billing issue, security alert (default on)
+3. **Activity**: New member, product enabled (configurable)
+4. **Marketing**: Feature announcements (opt-in only)
+
+### User Preferences
+
+```
+notification_preferences
+├── user_id
+├── organization_id
+├── notification_type
+├── channel (email/in_app/webhook)
+└── enabled (boolean)
+```
+
+**Defaults**:
+- Transactional: Email + In-App
+- System: Email + In-App
+- Activity: In-App only
+- Marketing: None
+
+### Delivery Strategy
+
+**Email**:
+- Queue-based async delivery
+- Template engine (Handlebars, Liquid)
+- Localization support
+- Bounce/complaint handling
+- Unsubscribe link (except transactional)
+
+**In-App**:
+- Real-time via WebSocket
+- Fallback to polling
+- Notification center UI
+- Read/unread tracking
+- Bulk mark as read
+
+**Webhook**:
+- For integrations
+- Retry with exponential backoff (3 attempts)
+- Signature verification (HMAC)
+- Delivery status tracking
+
+---
+
+## 🌐 Frontend Considerations
+
+### Multi-Tenant Frontend Architecture
+
+```
+┌──────────────────────────────────────┐
+│      App Shell (Core UI)             │
+├──────────────────────────────────────┤
+│  • Navigation  • Auth  • Settings    │
+└──────────────────────────────────────┘
+           │
+    ┌──────┴──────┬──────────┐
+    ↓             ↓          ↓
+┌────────┐  ┌─────────┐  ┌──────────┐
+│Product │  │Product  │  │ Product  │
+│   A    │  │    B    │  │    C     │
+│Widget  │  │ Widget  │  │  Widget  │
+└────────┘  └─────────┘  └──────────┘
+```
+
+### Org Switching
+
+**URL Structure**:
+- `app.platform.com/org/{orgSlug}/dashboard`
+- `app.platform.com/org/{orgSlug}/products/{productSlug}`
+
+**Context Management**:
+- Global state: Current org, user, permissions
+- Persist last visited org in localStorage
+- Switch org via dropdown (reload context)
+- Deep links preserve org context
+
+### Module Federation (Micro-frontends)
+
+**Benefits**:
+- Products deployed independently
+- Different teams own different products
+- Load product code on-demand
+- Share core components (design system)
+
+**Challenges**:
+- Coordination on shared dependencies
+- Routing complexity
+- State management across modules
+
+### Offline Support
+
+**Service Worker**:
+- Cache static assets
+- Offline page for no connectivity
+- Background sync for queued actions
+
+---
+
+## 🔮 Future Extensibility
+
+### Planned Enhancements
+
+#### 1. **Advanced RBAC**
+- **Resource-level permissions**: Per-document access
+- **Conditional permissions**: Time-based, IP-based
+- **Approval workflows**: Require approval for sensitive actions
+- **Audit modes**: Read-only access with full audit trail
+
+#### 2. **Enterprise Features**
+- **SAML SSO**: Okta, Azure AD, Google Workspace
+- **SCIM**: Automated user provisioning
+- **Advanced audit logs**: Tamper-proof, compliance exports
+- **Custom domains**: `app.customer.com`
+- **Dedicated infrastructure**: Isolated databases, regions
+
+#### 3. **Marketplace**
+- Third-party products installable
+- OAuth flow for product authorization
+- Revenue sharing model
+- Product certification program
+
+#### 4. **AI/ML Features**
+- Anomaly detection (unusual access patterns)
+- Usage predictions (billing forecasts)
+- Smart permissions (suggest roles based on usage)
+- Chatbot for support
+
+#### 5. **Mobile SDK**
+- Native iOS/Android SDKs
+- Offline-first architecture
+- Push notifications
+- Biometric authentication
+
+#### 6. **API Gateway Evolution**
+- GraphQL alternative to REST
+- gRPC for internal services
+- API composition (BFF pattern)
+- Real-time subscriptions (WebSocket/SSE)
+
+### Migration Paths
+
+**Scaling Stages**:
+
+1. **Stage 1** (0-100 orgs): Shared DB, single region
+2. **Stage 2** (100-1K orgs): Read replicas, caching layer
+3. **Stage 3** (1K-10K orgs): Sharding by org tier, job queues
+4. **Stage 4** (10K+ orgs): Multi-region, dedicated DBs for enterprise
+5. **Stage 5** (Scale): Separate service per product, event-driven
+
+**Migration Strategy**:
+- Feature flags for gradual rollout
+- Dual-write during migrations
+- Blue-green deployments
+- Canary releases for risky changes
+
+---
+
+## 📋 Summary & Recommendations
+
+### Architecture Principles
+
+1. **Security First**: Multi-layered security, zero-trust, audit everything
+2. **Tenant Isolation**: Absolute data segregation, no cross-tenant leaks
+3. **Modularity**: Products as plugins, clear interfaces
+4. **Scalability**: Horizontal scaling, caching, async processing
+5. **Operability**: Observability, automated deployment, fast recovery
+6. **Flexibility**: Pluggable auth, billing, products
+
+### Technology Stack Recommendations
+
+**Backend**:
+- **Language**: Node.js (TypeScript) or Go (performance-critical)
+- **Framework**: NestJS (Node) or Echo (Go)
+- **Database**: PostgreSQL 15+ (JSONB, RLS, partitioning)
+- **Cache**: Redis (cluster mode)
+- **Queue**: RabbitMQ or AWS SQS
+- **Search**: Elasticsearch or Algolia
+
+**Frontend**:
+- **Framework**: React or Vue 3
+- **State**: Zustand, Pinia
+- **Build**: Vite, Webpack Module Federation
+- **UI**: Custom design system (Tailwind + Headless UI)
+
+**Infrastructure**:
+- **Container Orchestration**: Kubernetes (EKS, GKE)
+- **IaC**: Terraform
+- **CI/CD**: GitHub Actions, ArgoCD
+- **Monitoring**: DataDog, Grafana, Prometheus
+- **Secrets**: HashiCorp Vault, AWS Secrets Manager
+
+### Implementation Roadmap
+
+**Phase 1** (Months 1-3): Foundation
+- Core data models
+- Authentication service (JWT, email/password, magic link)
+- Basic RBAC (system roles)
+- Organization CRUD
+- User management
+- Invitation system
+
+**Phase 2** (Months 4-6): Multi-tenancy
+- Tenant isolation (RLS)
+- Team management
+- Custom roles
+- Product registry framework
+- First product integration
+- Basic billing (Stripe)
+
+**Phase 3** (Months 7-9): Scale & Security
+- Caching layer
+- Read replicas
+- Audit logging
+- Advanced permissions (ABAC)
+- Social login
+- API rate limiting
+
+**Phase 4** (Months 10-12): Enterprise & Polish
+- Product-specific billing
+- Usage metering
+- Enhanced observability
+- Multi-region preparation
+- Security certifications (SOC 2)
+- Mobile app
+
+**Phase 5** (Year 2+): Advanced Features
+- SAML SSO
+- SCIM provisioning
+- Marketplace
+- AI features
+- Global deployment
+
+---
+
+This architecture provides a **solid foundation** that can scale from MVP to millions of users. The key is starting simple with **tenant isolation, security, and modularity** built-in from day one, then layering on complexity as needed.
+
+The pluggable product architecture allows **independent development** of features while maintaining **centralized user management, billing, and security**—giving you the best of both monolith (simplicity) and microservices (flexibility).
