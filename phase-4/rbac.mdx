@@ -155,6 +155,10 @@ class Permission(BaseModel):
         super().save(*args, **kwargs)
 
 
+<Info>
+**Role Inheritance**: Roles can inherit from other roles, reducing duplication. For example, an "Editor" role can inherit all "Viewer" permissions plus additional edit permissions.
+</Info>
+
 class Role(BaseModel):
     """
     Role model defining a set of permissions.
