@@ -1,0 +1,258 @@
+---
+title: 'Folder structure'
+description: 'Current folder structure.'
+---
+
+```
+saas_platform/
+├── manage.py
+├── requirements/
+│   ├── base.txt
+│   ├── development.txt
+│   ├── production.txt
+│   └── test.txt
+│
+├── config/
+│   ├── __init__.py
+│   ├── asgi.py
+│   ├── wsgi.py
+│   ├── celery.py
+│   ├── urls.py
+│   └── settings/
+│       ├── __init__.py
+│       ├── base.py
+│       ├── development.py
+│       ├── production.py
+│       └── test.py
+│
+├── apps/
+│   ├── __init__.py
+│   │
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── apps.py
+│   │   ├── models.py
+│   │   ├── managers.py
+│   │   ├── mixins.py
+│   │   ├── middleware.py
+│   │   ├── permissions.py
+│   │   ├── exceptions.py
+│   │   ├── pagination.py
+│   │   ├── utils.py
+│   │   └── validators.py
+│   │
+│   ├── authentication/
+│   │   ├── __init__.py
+│   │   ├── apps.py
+│   │   ├── models.py
+│   │   ├── managers.py
+│   │   ├── serializers.py
+│   │   ├── views.py
+│   │   ├── urls.py
+│   │   ├── backends.py
+│   │   ├── services.py
+│   │   ├── tasks.py
+│   │   ├── signals.py
+│   │   └── admin.py
+│   │
+│   ├── organizations/
+│   │   ├── __init__.py
+│   │   ├── apps.py
+│   │   ├── models.py
+│   │   ├── managers.py
+│   │   ├── serializers.py
+│   │   ├── views.py
+│   │   ├── urls.py
+│   │   ├── services.py
+│   │   ├── permissions.py
+│   │   ├── tasks.py
+│   │   ├── signals.py
+│   │   └── admin.py
+│   │
+│   ├── teams/
+│   │   ├── __init__.py
+│   │   ├── apps.py
+│   │   ├── models.py
+│   │   ├── managers.py
+│   │   ├── serializers.py
+│   │   ├── views.py
+│   │   ├── urls.py
+│   │   ├── services.py
+│   │   ├── tasks.py
+│   │   ├── signals.py
+│   │   └── admin.py
+│   │
+│   ├── invitations/
+│   │   ├── __init__.py
+│   │   ├── apps.py
+│   │   ├── models.py
+│   │   ├── managers.py
+│   │   ├── serializers.py
+│   │   ├── views.py
+│   │   ├── urls.py
+│   │   ├── services.py
+│   │   ├── tasks.py
+│   │   ├── signals.py
+│   │   └── admin.py
+│   │
+│   ├── rbac/
+│   │   ├── __init__.py
+│   │   ├── apps.py
+│   │   ├── models.py
+│   │   ├── managers.py
+│   │   ├── serializers.py
+│   │   ├── views.py
+│   │   ├── urls.py
+│   │   ├── services.py
+│   │   ├── decorators.py
+│   │   ├── backends.py
+│   │   ├── permissions.py
+│   │   ├── defaults.py
+│   │   ├── tasks.py
+│   │   ├── signals.py
+│   │   ├── admin.py
+│   │   └── management/
+│   │       └── commands/
+│   │           └── setup_rbac.py
+│   │
+│   ├── audit/
+│   │   ├── __init__.py
+│   │   ├── apps.py
+│   │   ├── models.py
+│   │   ├── managers.py
+│   │   ├── serializers.py
+│   │   ├── views.py
+│   │   ├── urls.py
+│   │   ├── services.py
+│   │   ├── middleware.py
+│   │   ├── signals.py
+│   │   ├── tasks.py
+│   │   └── admin.py
+│   │
+│   ├── notifications/
+│   │   ├── __init__.py
+│   │   ├── apps.py
+│   │   ├── models.py
+│   │   ├── managers.py
+│   │   ├── serializers.py
+│   │   ├── views.py
+│   │   ├── urls.py
+│   │   ├── services.py
+│   │   ├── channels/
+│   │   │   ├── __init__.py
+│   │   │   ├── base.py
+│   │   │   ├── email.py
+│   │   │   └── in_app.py
+│   │   ├── tasks.py
+│   │   └── admin.py
+│   │
+│   ├── products/
+│   │   ├── __init__.py
+│   │   ├── apps.py
+│   │   ├── models.py
+│   │   ├── serializers.py
+│   │   ├── views.py
+│   │   ├── urls.py
+│   │   ├── services.py
+│   │   ├── registry.py
+│   │   ├── base.py
+│   │   ├── signals.py
+│   │   └── admin.py
+│   │
+│   └── webhooks/
+│       ├── __init__.py
+│       ├── apps.py
+│       ├── models.py
+│       ├── serializers.py
+│       ├── views.py
+│       ├── urls.py
+│       ├── services.py
+│       ├── tasks.py
+│       └── admin.py
+│
+├── products/  # <-- YOUR CUSTOM PRODUCT PLUGINS GO HERE
+│   ├── __init__.py
+│   │
+│   ├── billing_product/  # Example product plugin
+│   │   ├── __init__.py
+│   │   ├── plugin.py     # Main plugin class (inherits from BaseProduct)
+│   │   ├── models.py     # Product-specific models
+│   │   ├── serializers.py
+│   │   ├── views.py
+│   │   ├── urls.py
+│   │   ├── services.py
+│   │   ├── tasks.py
+│   │   └── admin.py
+│   │
+│   ├── analytics_product/  # Another product plugin
+│   │   ├── __init__.py
+│   │   ├── plugin.py
+│   │   ├── models.py
+│   │   ├── serializers.py
+│   │   ├── views.py
+│   │   ├── urls.py
+│   │   └── services.py
+│   │
+│   └── your_custom_product/  # <-- YOUR NEW PRODUCT HERE
+│       ├── __init__.py
+│       ├── plugin.py      # Must inherit from apps.products.base.BaseProduct
+│       ├── models.py      # Your product's models
+│       ├── serializers.py # Your product's serializers
+│       ├── views.py       # Your product's views
+│       ├── urls.py        # Your product's URLs
+│       ├── services.py    # Your product's business logic
+│       ├── tasks.py       # Your product's Celery tasks
+│       └── admin.py       # Your product's admin interface
+│
+├── templates/
+│   └── emails/
+│       ├── base_email.html
+│       ├── invitation.html
+│       ├── email_verification.html
+│       ├── magic_link.html
+│       ├── password_reset.html
+│       ├── password_changed.html
+│       ├── team_member_added.html
+│       └── notification.html
+│
+├── static/
+├── media/
+├── logs/
+├── .env.example
+├── .gitignore
+├── pytest.ini
+└── setup.cfg
+```
+
+## Where to Add Your Product Code:
+
+### For a new product plugin:
+
+1. **Create folder**: `products/your_product_name/`
+2. **Required file**: `plugin.py` that contains a class inheriting from `apps.products.base.BaseProduct`
+3. **Add your models**: `products/your_product_name/models.py`
+4. **Add your views**: `products/your_product_name/views.py`
+5. **Add your URLs**: `products/your_product_name/urls.py`
+6. **Register in settings**: Add `'products.your_product_name'` to `PRODUCT_MODULES` in `config/settings/base.py`
+
+### Example plugin.py:
+
+```python
+# products/your_product_name/plugin.py
+from apps.products.base import BaseProduct
+from apps.products.registry import register_product
+
+@register_product
+class YourProduct(BaseProduct):
+    slug = 'your_product'
+    name = 'Your Product Name'
+
+    def on_install(self, organization_product):
+        # Installation logic
+        return True
+
+    def on_uninstall(self, organization_product):
+        # Uninstall logic
+        return True
+```
+

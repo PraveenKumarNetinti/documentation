@@ -1,0 +1,1208 @@
+---
+title: "Phase 2: Core App, User Model & Authentication System"
+description: "Now I'll build the core foundation models, custom user authentication, and essential utilities."
+---
+
+## Apps Structure for Phase 2
+
+```
+apps/
+├── core/
+│   ├── __init__.py
+│   ├── apps.py
+│   ├── models.py          # Base models
+│   ├── managers.py        # Custom managers
+│   ├── mixins.py          # Model mixins
+│   ├── middleware.py      # Tenant context middleware
+│   ├── permissions.py     # DRF permission classes
+│   ├── exceptions.py      # Custom exceptions
+│   ├── pagination.py      # Custom pagination
+│   ├── utils.py           # Utility functions
+│   └── validators.py      # Custom validators
+│
+└── authentication/
+    ├── __init__.py
+    ├── apps.py
+    ├── models.py          # User, Session, RefreshToken
+    ├── managers.py        # UserManager
+    ├── serializers.py     # Auth serializers
+    ├── views.py           # Auth views
+    ├── urls.py            # Auth URLs
+    ├── backends.py        # Custom auth backends
+    ├── strategies/        # Auth strategies
+    │   ├── __init__.py
+    │   ├── password.py
+    │   └── magic_link.py
+    ├── services.py        # Business logic
+    ├── tasks.py           # Celery tasks
+    └── admin.py
+```
+
+---
+
+## 🔧 Core App Implementation
+
+### `apps/core/apps.py`
+
+```python
+from django.apps import AppConfig
+
+
+class CoreConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.core'
+    verbose_name = 'Core'
+
+    def ready(self):
+        """Initialize app when Django starts."""
+        pass
+```
+
+### `apps/core/models.py`
+
+```python
+"""
+Base models and mixins for the entire application.
+"""
+import uuid
+from django.db import models
+from django.utils import timezone
+
+
+class BaseModel(models.Model):
+    """
+    Abstract base model with common fields for all models.
+    """
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return str(self.id)
+
+
+class SoftDeleteModel(models.Model):
+    """
+    Abstract model that provides soft delete functionality.
+    """
+    deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    is_deleted = models.BooleanField(default=False, db_index=True)
+
+    class Meta:
+        abstract = True
+
+    def delete(self, using=None, keep_parents=False, hard=False):
+        """
+        Soft delete by default, unless hard=True.
+        """
+        if hard:
+            super().delete(using=using, keep_parents=keep_parents)
+        else:
+            self.deleted_at = timezone.now()
+            self.is_deleted = True
+            self.save(update_fields=['deleted_at', 'is_deleted'])
+
+    def restore(self):
+        """
+        Restore a soft-deleted instance.
+        """
+        self.deleted_at = None
+        self.is_deleted = False
+        self.save(update_fields=['deleted_at', 'is_deleted'])
+
+
+class TimestampedModel(models.Model):
+    """
+    Abstract model that provides self-updating created and modified fields.
+    """
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+```
+
+### `apps/core/managers.py`
+
+```python
+"""
+Custom model managers and querysets.
+"""
+from django.db import models
+from django.db.models import Q
+
+
+class SoftDeleteQuerySet(models.QuerySet):
+    """
+    QuerySet that filters out soft-deleted objects by default.
+    """
+    def delete(self):
+        """
+        Soft delete all objects in queryset.
+        """
+        return self.update(deleted_at=models.functions.Now(), is_deleted=True)
+
+    def hard_delete(self):
+        """
+        Permanently delete all objects in queryset.
+        """
+        return super().delete()
+
+    def alive(self):
+        """
+        Return only non-deleted objects.
+        """
+        return self.filter(is_deleted=False)
+
+    def dead(self):
+        """
+        Return only deleted objects.
+        """
+        return self.filter(is_deleted=True)
+
+
+class SoftDeleteManager(models.Manager):
+    """
+    Manager that returns only non-deleted objects by default.
+    """
+    def get_queryset(self):
+        return SoftDeleteQuerySet(self.model, using=self._db).alive()
+
+    def all_with_deleted(self):
+        """
+        Return all objects including deleted ones.
+        """
+        return SoftDeleteQuerySet(self.model, using=self._db)
+
+    def deleted_only(self):
+        """
+        Return only deleted objects.
+        """
+        return SoftDeleteQuerySet(self.model, using=self._db).dead()
+
+
+class TenantQuerySet(models.QuerySet):
+    """
+    QuerySet for tenant-scoped models.
+    """
+    def for_organization(self, organization):
+        """
+        Filter by organization.
+        """
+        return self.filter(organization=organization)
+
+    def active(self):
+        """
+        Return only active objects.
+        """
+        return self.filter(status='active')
+
+
+class TenantManager(models.Manager):
+    """
+    Manager for tenant-scoped models.
+    """
+    def get_queryset(self):
+        return TenantQuerySet(self.model, using=self._db)
+
+    def for_organization(self, organization):
+        return self.get_queryset().for_organization(organization)
+
+    def active(self):
+        return self.get_queryset().active()
+```
+
+### `apps/core/mixins.py`
+
+```python
+"""
+Model mixins for common functionality.
+"""
+from django.db import models
+
+
+class StatusMixin(models.Model):
+    """
+    Mixin for models that need a status field.
+    """
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('inactive', 'Inactive'),
+        ('suspended', 'Suspended'),
+        ('deleted', 'Deleted'),
+    ]
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='active',
+        db_index=True
+    )
+
+    class Meta:
+        abstract = True
+
+    def activate(self):
+        """Activate the instance."""
+        self.status = 'active'
+        self.save(update_fields=['status'])
+
+    def deactivate(self):
+        """Deactivate the instance."""
+        self.status = 'inactive'
+        self.save(update_fields=['status'])
+
+    def suspend(self):
+        """Suspend the instance."""
+        self.status = 'suspended'
+        self.save(update_fields=['status'])
+
+    @property
+    def is_active(self):
+        return self.status == 'active'
+
+
+class MetadataMixin(models.Model):
+    """
+    Mixin for models that need a metadata JSON field.
+    """
+    metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Additional metadata stored as JSON"
+    )
+
+    class Meta:
+        abstract = True
+
+    def set_metadata(self, key, value):
+        """Set a metadata value."""
+        self.metadata[key] = value
+        self.save(update_fields=['metadata'])
+
+    def get_metadata(self, key, default=None):
+        """Get a metadata value."""
+        return self.metadata.get(key, default)
+```
+
+### `apps/core/middleware.py`
+
+```python
+"""
+Custom middleware for tenant context and request tracking.
+"""
+import logging
+import uuid
+from django.utils.deprecation import MiddlewareMixin
+from django.contrib.auth.models import AnonymousUser
+
+logger = logging.getLogger(__name__)
+
+
+class TenantContextMiddleware(MiddlewareMixin):
+    """
+    Middleware to set tenant context for each request.
+    Extracts organization from URL or header and sets it on request.
+    """
+    def process_request(self, request):
+        # Generate unique request ID
+        request.request_id = str(uuid.uuid4())
+        
+        # Initialize tenant context
+        request.organization = None
+        request.tenant_context = {
+            'organization_id': None,
+            'user_id': None,
+            'request_id': request.request_id,
+        }
+
+        # Extract organization from URL path
+        # Format: /api/v1/organizations/{org_id}/...
+        path_parts = request.path.split('/')
+        if 'organizations' in path_parts:
+            try:
+                org_index = path_parts.index('organizations')
+                if len(path_parts) > org_index + 1:
+                    org_id = path_parts[org_index + 1]
+                    # Validate UUID format
+                    if self._is_valid_uuid(org_id):
+                        request.tenant_context['organization_id'] = org_id
+            except (ValueError, IndexError):
+                pass
+
+        # Extract from custom header (alternative method)
+        org_header = request.META.get('HTTP_X_ORGANIZATION_ID')
+        if org_header and self._is_valid_uuid(org_header):
+            request.tenant_context['organization_id'] = org_header
+
+        # Set user ID if authenticated
+        if hasattr(request, 'user') and not isinstance(request.user, AnonymousUser):
+            request.tenant_context['user_id'] = str(request.user.id)
+
+        # Set PostgreSQL session variables for RLS
+        if request.tenant_context['organization_id']:
+            self._set_postgres_context(request.tenant_context)
+
+        return None
+
+    def process_response(self, request, response):
+        # Add request ID to response headers
+        if hasattr(request, 'request_id'):
+            response['X-Request-ID'] = request.request_id
+        return response
+
+    @staticmethod
+    def _is_valid_uuid(value):
+        """Check if value is a valid UUID."""
+        try:
+            uuid.UUID(str(value))
+            return True
+        except (ValueError, AttributeError):
+            return False
+
+    @staticmethod
+    def _set_postgres_context(context):
+        """
+        Set PostgreSQL session variables for Row-Level Security.
+        """
+        from django.db import connection
+        
+        with connection.cursor() as cursor:
+            if context.get('organization_id'):
+                cursor.execute(
+                    "SELECT set_config('app.current_organization_id', %s, false)",
+                    [str(context['organization_id'])]
+                )
+            if context.get('user_id'):
+                cursor.execute(
+                    "SELECT set_config('app.current_user_id', %s, false)",
+                    [str(context['user_id'])]
+                )
+
+
+class RequestLoggingMiddleware(MiddlewareMixin):
+    """
+    Middleware to log all requests with relevant context.
+    """
+    def process_request(self, request):
+        request._start_time = logger.info(
+            f"Request started: {request.method} {request.path}",
+            extra={
+                'request_id': getattr(request, 'request_id', None),
+                'method': request.method,
+                'path': request.path,
+                'user': str(request.user) if hasattr(request, 'user') else 'Anonymous',
+            }
+        )
+
+    def process_response(self, request, response):
+        logger.info(
+            f"Request completed: {request.method} {request.path} - {response.status_code}",
+            extra={
+                'request_id': getattr(request, 'request_id', None),
+                'method': request.method,
+                'path': request.path,
+                'status_code': response.status_code,
+                'user': str(request.user) if hasattr(request, 'user') else 'Anonymous',
+            }
+        )
+        return response
+```
+
+### `apps/core/permissions.py`
+
+```python
+"""
+Custom DRF permission classes.
+"""
+from rest_framework import permissions
+from rest_framework.exceptions import PermissionDenied
+
+
+class IsAuthenticated(permissions.BasePermission):
+    """
+    Custom IsAuthenticated with better error messages.
+    """
+    message = "Authentication required to access this resource."
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated)
+
+
+class IsOrganizationMember(permissions.BasePermission):
+    """
+    Check if user is a member of the organization.
+    """
+    message = "You must be a member of this organization."
+
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        org_id = request.tenant_context.get('organization_id')
+        if not org_id:
+            return False
+
+        # Import here to avoid circular imports
+        from apps.organizations.models import OrganizationMember
+
+        return OrganizationMember.objects.filter(
+            organization_id=org_id,
+            user=request.user,
+            status='active'
+        ).exists()
+
+
+class HasOrganizationPermission(permissions.BasePermission):
+    """
+    Check if user has specific permission in organization context.
+    Usage: permission_required = 'members.create'
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        permission = getattr(view, 'permission_required', None)
+        if not permission:
+            return True
+
+        org_id = request.tenant_context.get('organization_id')
+        if not org_id:
+            return False
+
+        # Check permission through RBAC
+        from apps.rbac.services import PermissionService
+        
+        return PermissionService.user_has_permission(
+            user=request.user,
+            permission=permission,
+            organization_id=org_id
+        )
+
+
+class IsOwnerOrReadOnly(permissions.BasePermission):
+    """
+    Object-level permission to only allow owners to edit.
+    """
+    def has_object_permission(self, request, view, obj):
+        # Read permissions allowed for any request
+        if request.method in permissions.SAFE_METHODS:
+            return True
+
+        # Write permissions only for owner
+        return obj.created_by == request.user if hasattr(obj, 'created_by') else False
+```
+
+### `apps/core/exceptions.py`
+
+```python
+"""
+Custom exceptions and exception handler.
+"""
+from rest_framework.views import exception_handler
+from rest_framework.exceptions import APIException
+from rest_framework import status
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.http import Http404
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def custom_exception_handler(exc, context):
+    """
+    Custom exception handler that provides consistent error responses.
+    """
+    # Call REST framework's default exception handler first
+    response = exception_handler(exc, context)
+
+    if response is not None:
+        # Customize the response data
+        custom_response_data = {
+            'error': {
+                'code': getattr(exc, 'default_code', 'error'),
+                'message': str(exc.detail) if hasattr(exc, 'detail') else str(exc),
+                'details': exc.detail if hasattr(exc, 'detail') and isinstance(exc.detail, dict) else {},
+            }
+        }
+
+        # Add request ID if available
+        request = context.get('request')
+        if request and hasattr(request, 'request_id'):
+            custom_response_data['error']['request_id'] = request.request_id
+
+        response.data = custom_response_data
+
+        # Log the error
+        logger.error(
+            f"API Error: {exc}",
+            extra={
+                'request_id': getattr(request, 'request_id', None) if request else None,
+                'status_code': response.status_code,
+                'error': custom_response_data['error'],
+            },
+            exc_info=True
+        )
+
+    # Handle Django validation errors
+    elif isinstance(exc, DjangoValidationError):
+        response_data = {
+            'error': {
+                'code': 'VALIDATION_ERROR',
+                'message': 'Validation failed',
+                'details': exc.message_dict if hasattr(exc, 'message_dict') else {'non_field_errors': exc.messages},
+            }
+        }
+        from rest_framework.response import Response
+        response = Response(response_data, status=status.HTTP_400_BAD_REQUEST)
+
+    # Handle 404 errors
+    elif isinstance(exc, Http404):
+        response_data = {
+            'error': {
+                'code': 'NOT_FOUND',
+                'message': 'Resource not found',
+            }
+        }
+        from rest_framework.response import Response
+        response = Response(response_data, status=status.HTTP_404_NOT_FOUND)
+
+    return response
+
+
+class ServiceException(APIException):
+    """Base exception for service layer errors."""
+    status_code = status.HTTP_400_BAD_REQUEST
+    default_detail = 'A service error occurred.'
+    default_code = 'service_error'
+
+
+class PermissionDeniedException(APIException):
+    """Exception for permission denied errors."""
+    status_code = status.HTTP_403_FORBIDDEN
+    default_detail = 'You do not have permission to perform this action.'
+    default_code = 'permission_denied'
+
+
+class OrganizationSuspendedException(APIException):
+    """Exception when organization is suspended."""
+    status_code = status.HTTP_403_FORBIDDEN
+    default_detail = 'This organization has been suspended.'
+    default_code = 'organization_suspended'
+
+
+class ResourceNotFoundException(APIException):
+    """Exception when resource is not found."""
+    status_code = status.HTTP_404_NOT_FOUND
+    default_detail = 'The requested resource was not found.'
+    default_code = 'not_found'
+
+
+class AlreadyExistsException(APIException):
+    """Exception when resource already exists."""
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = 'This resource already exists.'
+    default_code = 'already_exists'
+
+
+class RateLimitException(APIException):
+    """Exception for rate limiting."""
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    default_detail = 'Rate limit exceeded. Please try again later.'
+    default_code = 'rate_limit_exceeded'
+```
+
+### `apps/core/pagination.py`
+
+```python
+"""
+Custom pagination classes.
+"""
+from rest_framework.pagination import PageNumberPagination, CursorPagination
+from rest_framework.response import Response
+from collections import OrderedDict
+
+
+class CustomPagination(PageNumberPagination):
+    """
+    Custom pagination with configurable page size.
+    """
+    page_size = 20
+    page_size_query_param = 'per_page'
+    max_page_size = 100
+
+    def get_paginated_response(self, data):
+        return Response(OrderedDict([
+            ('data', data),
+            ('meta', OrderedDict([
+                ('current_page', self.page.number),
+                ('per_page', self.page.paginator.per_page),
+                ('total', self.page.paginator.count),
+                ('total_pages', self.page.paginator.num_pages),
+                ('has_next', self.page.has_next()),
+                ('has_previous', self.page.has_previous()),
+            ]))
+        ]))
+
+
+class CustomCursorPagination(CursorPagination):
+    """
+    Cursor-based pagination for large datasets.
+    """
+    page_size = 20
+    page_size_query_param = 'limit'
+    max_page_size = 100
+    ordering = '-created_at'
+
+    def get_paginated_response(self, data):
+        return Response(OrderedDict([
+            ('data', data),
+            ('meta', OrderedDict([
+                ('next', self.get_next_link()),
+                ('previous', self.get_previous_link()),
+            ]))
+        ]))
+```
+
+### `apps/core/utils.py`
+
+```python
+"""
+Utility functions.
+"""
+import hashlib
+import secrets
+import string
+from typing import Optional
+
+
+def generate_random_token(length: int = 32) -> str:
+    """
+    Generate a cryptographically secure random token.
+    """
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+def generate_secure_hash(value: str) -> str:
+    """
+    Generate a secure hash of a value.
+    """
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def mask_email(email: str) -> str:
+    """
+    Mask an email address for privacy.
+    Example: john.doe@example.com -> j***e@example.com
+    """
+    if not email or '@' not in email:
+        return email
+
+    local, domain = email.split('@')
+    if len(local) <= 2:
+        masked_local = local[0] + '*'
+    else:
+        masked_local = local[0] + '*' * (len(local) - 2) + local[-1]
+
+    return f"{masked_local}@{domain}"
+
+
+def truncate_string(text: str, length: int = 50, suffix: str = '...') -> str:
+    """
+    Truncate a string to a specific length.
+    """
+    if len(text) <= length:
+        return text
+    return text[:length - len(suffix)] + suffix
+
+
+class TenantContext:
+    """
+    Context manager for setting tenant context in service layer.
+    """
+    def __init__(self, organization_id: Optional[str] = None, user_id: Optional[str] = None):
+        self.organization_id = organization_id
+        self.user_id = user_id
+
+    def __enter__(self):
+        from django.db import connection
+        
+        with connection.cursor() as cursor:
+            if self.organization_id:
+                cursor.execute(
+                    "SELECT set_config('app.current_organization_id', %s, true)",
+                    [str(self.organization_id)]
+                )
+            if self.user_id:
+                cursor.execute(
+                    "SELECT set_config('app.current_user_id', %s, true)",
+                    [str(self.user_id)]
+                )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        from django.db import connection
+        
+        with connection.cursor() as cursor:
+            cursor.execute("RESET app.current_organization_id")
+            cursor.execute("RESET app.current_user_id")
+```
+
+### `apps/core/validators.py`
+
+```python
+"""
+Custom validators.
+"""
+from django.core.exceptions import ValidationError
+from django.utils.translation import gettext_lazy as _
+import re
+
+
+def validate_slug(value):
+    """
+    Validate that a slug contains only lowercase letters, numbers, and hyphens.
+    """
+    if not re.match(r'^[a-z0-9-]+$', value):
+        raise ValidationError(
+            _('Slug can only contain lowercase letters, numbers, and hyphens.'),
+            code='invalid_slug'
+        )
+
+
+def validate_phone_number(value):
+    """
+    Basic phone number validation.
+    """
+    # Remove common formatting characters
+    cleaned = re.sub(r'[\s\-\(\)]', '', value)
+    
+    if not re.match(r'^\+?[1-9]\d{1,14}$', cleaned):
+        raise ValidationError(
+            _('Enter a valid phone number.'),
+            code='invalid_phone'
+        )
+
+
+def validate_url_safe_string(value):
+    """
+    Validate that string is URL-safe.
+    """
+    if not re.match(r'^[a-zA-Z0-9_-]+$', value):
+        raise ValidationError(
+            _('String can only contain letters, numbers, underscores, and hyphens.'),
+            code='invalid_url_safe_string'
+        )
+```
+
+---
+
+## 🔐 Authentication App Implementation
+
+### `apps/authentication/apps.py`
+
+```python
+from django.apps import AppConfig
+
+
+class AuthenticationConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.authentication'
+    verbose_name = 'Authentication'
+
+    def ready(self):
+        """Import signals when app is ready."""
+        import apps.authentication.signals  # noqa
+```
+
+### `apps/authentication/models.py`
+
+```python
+"""
+User and authentication-related models.
+"""
+from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.db import models
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
+from apps.core.models import BaseModel
+from apps.core.utils import generate_random_token, generate_secure_hash
+from .managers import UserManager
+
+
+class User(AbstractBaseUser, PermissionsMixin, BaseModel):
+    """
+    Custom User model with email as username.
+    """
+    email = models.EmailField(
+        _('email address'),
+        unique=True,
+        db_index=True,
+        error_messages={
+            'unique': _("A user with that email already exists."),
+        }
+    )
+    display_name = models.CharField(_('display name'), max_length=255)
+    avatar_url = models.URLField(_('avatar URL'), max_length=500, blank=True)
+    
+    # Status fields
+    is_active = models.BooleanField(_('active'), default=True)
+    is_staff = models.BooleanField(_('staff status'), default=False)
+    is_superuser = models.BooleanField(_('superuser status'), default=False)
+    
+    # Verification
+    email_verified = models.BooleanField(_('email verified'), default=False)
+    email_verified_at = models.DateTimeField(_('email verified at'), null=True, blank=True)
+    
+    # Profile
+    timezone = models.CharField(max_length=50, default='UTC')
+    locale = models.CharField(max_length=10, default='en')
+    
+    # Activity tracking
+    last_login_at = models.DateTimeField(_('last login'), null=True, blank=True)
+    last_login_ip = models.GenericIPAddressField(null=True, blank=True)
+    
+    # Metadata
+    metadata = models.JSONField(default=dict, blank=True)
+
+    objects = UserManager()
+
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['display_name']
+
+    class Meta:
+        db_table = 'users'
+        verbose_name = _('user')
+        verbose_name_plural = _('users')
+        indexes = [
+            models.Index(fields=['email']),
+            models.Index(fields=['is_active', 'email_verified']),
+        ]
+
+    def __str__(self):
+        return self.email
+
+    def get_full_name(self):
+        return self.display_name
+
+    def get_short_name(self):
+        return self.display_name
+
+    def verify_email(self):
+        """Mark email as verified."""
+        self.email_verified = True
+        self.email_verified_at = timezone.now()
+        self.save(update_fields=['email_verified', 'email_verified_at'])
+
+    def update_last_login(self, ip_address=None):
+        """Update last login timestamp and IP."""
+        self.last_login_at = timezone.now()
+        if ip_address:
+            self.last_login_ip = ip_address
+        self.save(update_fields=['last_login_at', 'last_login_ip'])
+
+
+class UserIdentity(BaseModel):
+    """
+    Store external identity providers (OAuth, SAML, etc.)
+    """
+    PROVIDER_CHOICES = [
+        ('google', 'Google'),
+        ('github', 'GitHub'),
+        ('microsoft', 'Microsoft'),
+        ('apple', 'Apple'),
+        ('saml', 'SAML'),
+    ]
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='identities'
+    )
+    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES)
+    provider_user_id = models.CharField(max_length=255)
+    provider_data = models.JSONField(default=dict, blank=True)
+    verified = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'user_identities'
+        verbose_name = _('user identity')
+        verbose_name_plural = _('user identities')
+        unique_together = [['provider', 'provider_user_id']]
+        indexes = [
+            models.Index(fields=['user', 'provider']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.provider}"
+
+
+class AuthSession(BaseModel):
+    """
+    Store user sessions for tracking and security.
+    """
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='auth_sessions'
+    )
+    token_hash = models.CharField(max_length=255, unique=True, db_index=True)
+    refresh_token_hash = models.CharField(max_length=255, unique=True, db_index=True, null=True)
+    
+    # Device information
+    device_fingerprint = models.CharField(max_length=255, blank=True)
+    ip_address = models.GenericIPAddressField()
+    user_agent = models.TextField(blank=True)
+    
+    # Session metadata
+    last_activity_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    is_revoked = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'auth_sessions'
+        verbose_name = _('auth session')
+        verbose_name_plural = _('auth sessions')
+        indexes = [
+            models.Index(fields=['user', 'is_revoked']),
+            models.Index(fields=['token_hash']),
+            models.Index(fields=['expires_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.created_at}"
+
+    def revoke(self):
+        """Revoke this session."""
+        self.is_revoked = True
+        self.revoked_at = timezone.now()
+        self.save(update_fields=['is_revoked', 'revoked_at'])
+
+    @property
+    def is_expired(self):
+        """Check if session has expired."""
+        return timezone.now() > self.expires_at
+
+    @property
+    def is_valid(self):
+        """Check if session is still valid."""
+        return not self.is_revoked and not self.is_expired
+
+
+class RefreshToken(BaseModel):
+    """
+    Store refresh tokens for JWT rotation.
+    """
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='refresh_tokens'
+    )
+    token_hash = models.CharField(max_length=255, unique=True, db_index=True)
+    session = models.ForeignKey(
+        AuthSession,
+        on_delete=models.CASCADE,
+        related_name='refresh_tokens',
+        null=True
+    )
+    
+    # Token lineage for detection of token reuse attacks
+    family_id = models.UUIDField(db_index=True)
+    parent_token = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='child_tokens'
+    )
+    
+    # Token status
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    is_revoked = models.BooleanField(default=False)
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'refresh_tokens'
+        verbose_name = _('refresh token')
+        verbose_name_plural = _('refresh tokens')
+        indexes = [
+            models.Index(fields=['user', 'is_revoked']),
+            models.Index(fields=['token_hash']),
+            models.Index(fields=['family_id']),
+            models.Index(fields=['expires_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.created_at}"
+
+    def revoke(self):
+        """Revoke this token."""
+        self.is_revoked = True
+        self.revoked_at = timezone.now()
+        self.save(update_fields=['is_revoked', 'revoked_at'])
+
+    def mark_used(self):
+        """Mark token as used."""
+        self.used_at = timezone.now()
+        self.save(update_fields=['used_at'])
+
+    @property
+    def is_expired(self):
+        """Check if token has expired."""
+        return timezone.now() > self.expires_at
+
+    @property
+    def is_valid(self):
+        """Check if token is still valid."""
+        return not self.is_revoked and not self.is_expired
+
+
+class MagicLink(BaseModel):
+    """
+    Store magic link tokens for passwordless authentication.
+    """
+    email = models.EmailField(db_index=True)
+    token = models.CharField(max_length=100, unique=True, db_index=True)
+    token_hash = models.CharField(max_length=255, unique=True)
+    
+    # Status
+    used_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+    ip_address = models.GenericIPAddressField(null=True)
+
+    class Meta:
+        db_table = 'magic_links'
+        verbose_name = _('magic link')
+        verbose_name_plural = _('magic links')
+        indexes = [
+            models.Index(fields=['email', 'expires_at']),
+            models.Index(fields=['token_hash']),
+        ]
+
+    def __str__(self):
+        return f"{self.email} - {self.created_at}"
+
+    @classmethod
+    def create_for_email(cls, email, ip_address=None):
+        """Create a new magic link for email."""
+        from datetime import timedelta
+        from django.conf import settings
+        
+        token = generate_random_token(32)
+        token_hash = generate_secure_hash(token)
+        
+        magic_link = cls.objects.create(
+            email=email,
+            token=token,
+            token_hash=token_hash,
+            ip_address=ip_address,
+            expires_at=timezone.now() + timedelta(
+                minutes=settings.MAGIC_LINK_EXPIRY_MINUTES
+            )
+        )
+        
+        return magic_link, token
+
+    def mark_used(self):
+        """Mark magic link as used."""
+        self.used_at = timezone.now()
+        self.save(update_fields=['used_at'])
+
+    @property
+    def is_expired(self):
+        """Check if magic link has expired."""
+        return timezone.now() > self.expires_at
+
+    @property
+    def is_valid(self):
+        """Check if magic link is still valid."""
+        return not self.used_at and not self.is_expired
+```
+
+### `apps/authentication/managers.py`
+
+```python
+"""
+Custom managers for User model.
+"""
+from django.contrib.auth.models import BaseUserManager
+from django.utils.translation import gettext_lazy as _
+
+
+class UserManager(BaseUserManager):
+    """
+    Custom user manager where email is the unique identifier.
+    """
+    def create_user(self, email, display_name, password=None, **extra_fields):
+        """
+        Create and save a User with the given email and password.
+        """
+        if not email:
+            raise ValueError(_('The Email field must be set'))
+        
+        email = self.normalize_email(email)
+        user = self.model(email=email, display_name=display_name, **extra_fields)
+        
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
+        
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(self, email, display_name, password=None, **extra_fields):
+        """
+        Create and save a SuperUser with the given email and password.
+        """
+        extra_fields.setdefault('is_staff', True)
+        extra_fields.setdefault('is_superuser', True)
+        extra_fields.setdefault('is_active', True)
+        extra_fields.setdefault('email_verified', True)
+
+        if extra_fields.get('is_staff') is not True:
+            raise ValueError(_('Superuser must have is_staff=True.'))
+        if extra_fields.get('is_superuser') is not True:
+            raise ValueError(_('Superuser must have is_superuser=True.'))
+
+        return self.create_user(email, display_name, password, **extra_fields)
+
+    def get_by_natural_key(self, email):
+        """
+        Get user by email (natural key).
+        """
+        return self.get(email=self.normalize_email(email))
+```
+
+---
+
+**Phase 2 Part 1 Complete!**
+
+This covers:
+
+- ✅ Core app with base models, managers, and utilities
+- ✅ Custom middleware for tenant context
+- ✅ Permission classes for DRF
+- ✅ Exception handling
+- ✅ Custom User model with authentication models
+- ✅ Session and token management models
+
+**Ready for Phase 2 Part 2?** Reply "Continue" and I'll implement:
+
+- Authentication serializers
+- Authentication views and URLs
+- Auth strategies (password, magic link)
+- Authentication services
+- Celery tasks for auth
+- Admin configuration

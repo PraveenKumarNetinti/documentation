@@ -1,0 +1,868 @@
+---
+title: 'Endpoints'
+description: 'List of endpoints required.'
+---
+
+# Complete API Endpoints Specification
+
+## Authentication Endpoints
+
+### Base Path: `/api/v1/auth`
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/register` | Register new user | No |
+| POST | `/login` | Email/password login | No |
+| POST | `/logout` | Logout current session | Yes |
+| POST | `/logout-all` | Logout all sessions | Yes |
+| POST | `/refresh` | Refresh access token | Yes (Refresh Token) |
+| POST | `/magic-link/request` | Request magic link email | No |
+| POST | `/magic-link/verify` | Verify magic link token | No |
+| POST | `/password/change` | Change password | Yes |
+| POST | `/password/reset/request` | Request password reset | No |
+| POST | `/password/reset/confirm` | Confirm password reset | No |
+| GET | `/sessions` | List active sessions | Yes |
+| DELETE | `/sessions/:sessionId` | Delete specific session | Yes |
+| POST | `/verify-email/request` | Resend verification email | Yes |
+| POST | `/verify-email/confirm` | Confirm email verification | No |
+
+#### Social Authentication (Future)
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/social/:provider` | Initiate OAuth flow | No |
+| GET | `/social/:provider/callback` | OAuth callback | No |
+| POST | `/social/:provider/connect` | Connect social account | Yes |
+| DELETE | `/social/:provider/disconnect` | Disconnect social account | Yes |
+| GET | `/social/connections` | List connected accounts | Yes |
+
+---
+
+## User Management Endpoints
+
+### Base Path: `/api/v1/users`
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/me` | Get current user profile | Yes |
+| PATCH | `/me` | Update current user profile | Yes |
+| DELETE | `/me` | Delete own account | Yes |
+| GET | `/me/organizations` | List user's organizations | Yes |
+| POST | `/me/switch-organization/:orgId` | Switch active organization | Yes |
+| GET | `/me/preferences` | Get user preferences | Yes |
+| PATCH | `/me/preferences` | Update user preferences | Yes |
+| POST | `/me/avatar` | Upload avatar | Yes |
+| DELETE | `/me/avatar` | Delete avatar | Yes |
+| GET | `/me/notifications/preferences` | Get notification preferences | Yes |
+| PATCH | `/me/notifications/preferences` | Update notification preferences | Yes |
+| GET | `/me/activity` | Get user activity log | Yes |
+| POST | `/me/export-data` | Request GDPR data export | Yes |
+
+---
+
+## Organization Endpoints
+
+### Base Path: `/api/v1/organizations`
+
+#### Core Organization Operations
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | List user's organizations | Yes | - |
+| POST | `/` | Create new organization | Yes | - |
+| GET | `/:orgId` | Get organization details | Yes | `org.read` |
+| PATCH | `/:orgId` | Update organization | Yes | `org.update` |
+| DELETE | `/:orgId` | Delete organization | Yes | `org.delete` (owner) |
+| POST | `/:orgId/transfer-ownership` | Transfer ownership | Yes | `org.transfer` (owner) |
+| POST | `/:orgId/suspend` | Suspend organization | Yes | System Admin |
+| POST | `/:orgId/activate` | Activate organization | Yes | System Admin |
+
+#### Organization Settings
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/:orgId/settings` | Get all settings | Yes | `org.settings.read` |
+| PATCH | `/:orgId/settings` | Update settings (bulk) | Yes | `org.settings.update` |
+| GET | `/:orgId/settings/:key` | Get specific setting | Yes | `org.settings.read` |
+| PUT | `/:orgId/settings/:key` | Update specific setting | Yes | `org.settings.update` |
+| DELETE | `/:orgId/settings/:key` | Delete setting (reset to default) | Yes | `org.settings.update` |
+
+---
+
+## Organization Members Endpoints
+
+### Base Path: `/api/v1/organizations/:orgId/members`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | List organization members | Yes | `members.read` |
+| GET | `/:userId` | Get member details | Yes | `members.read` |
+| PATCH | `/:userId` | Update member (role, status) | Yes | `members.update` |
+| DELETE | `/:userId` | Remove member | Yes | `members.delete` |
+| POST | `/:userId/suspend` | Suspend member | Yes | `members.suspend` |
+| POST | `/:userId/activate` | Activate member | Yes | `members.activate` |
+| GET | `/:userId/permissions` | Get member's permissions | Yes | `members.read` |
+| GET | `/:userId/activity` | Get member activity log | Yes | `members.read` |
+
+---
+
+## Invitation Endpoints
+
+### Base Path: `/api/v1/organizations/:orgId/invitations`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | List pending invitations | Yes | `invitations.read` |
+| POST | `/` | Invite user(s) to organization | Yes | `invitations.create` |
+| GET | `/:invitationId` | Get invitation details | Yes | `invitations.read` |
+| DELETE | `/:invitationId` | Cancel invitation | Yes | `invitations.delete` |
+| POST | `/:invitationId/resend` | Resend invitation email | Yes | `invitations.create` |
+
+### Public Invitation Endpoints (No Org Context)
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/api/v1/invitations/:token` | Get invitation details by token | No |
+| POST | `/api/v1/invitations/:token/accept` | Accept invitation | Yes |
+| POST | `/api/v1/invitations/:token/decline` | Decline invitation | Yes |
+| GET | `/api/v1/invitations/pending` | List user's pending invitations | Yes |
+
+---
+
+## Teams Endpoints
+
+### Base Path: `/api/v1/organizations/:orgId/teams`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | List all teams | Yes | `teams.read` |
+| POST | `/` | Create team | Yes | `teams.create` |
+| GET | `/:teamId` | Get team details | Yes | `teams.read` |
+| PATCH | `/:teamId` | Update team | Yes | `teams.update` |
+| DELETE | `/:teamId` | Delete team | Yes | `teams.delete` |
+| GET | `/:teamId/members` | List team members | Yes | `teams.read` |
+| POST | `/:teamId/members` | Add members to team | Yes | `teams.members.add` |
+| DELETE | `/:teamId/members/:userId` | Remove member from team | Yes | `teams.members.remove` |
+| PATCH | `/:teamId/members/:userId` | Update member's team role | Yes | `teams.members.update` |
+| GET | `/:teamId/permissions` | Get team permissions | Yes | `teams.read` |
+| POST | `/:teamId/permissions` | Grant team permissions | Yes | `teams.permissions.manage` |
+| DELETE | `/:teamId/permissions/:permissionId` | Revoke team permission | Yes | `teams.permissions.manage` |
+
+---
+
+## Roles & Permissions Endpoints
+
+### Base Path: `/api/v1/organizations/:orgId/roles`
+
+#### Role Management
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | List all roles | Yes | `roles.read` |
+| POST | `/` | Create custom role | Yes | `roles.create` |
+| GET | `/:roleId` | Get role details | Yes | `roles.read` |
+| PATCH | `/:roleId` | Update role | Yes | `roles.update` |
+| DELETE | `/:roleId` | Delete role | Yes | `roles.delete` |
+| GET | `/:roleId/permissions` | List role permissions | Yes | `roles.read` |
+| POST | `/:roleId/permissions` | Add permissions to role | Yes | `roles.update` |
+| DELETE | `/:roleId/permissions/:permissionId` | Remove permission from role | Yes | `roles.update` |
+| GET | `/:roleId/members` | List members with this role | Yes | `roles.read` |
+| POST | `/:roleId/duplicate` | Duplicate role | Yes | `roles.create` |
+
+#### Permission Management
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/permissions` | List all available permissions | Yes | `roles.read` |
+| GET | `/permissions/categories` | Get permission categories | Yes | `roles.read` |
+
+#### User Role Assignment
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/assignments` | List all role assignments | Yes | `roles.read` |
+| POST | `/assignments` | Assign role to user | Yes | `roles.assign` |
+| DELETE | `/assignments/:assignmentId` | Revoke role assignment | Yes | `roles.revoke` |
+| GET | `/assignments/user/:userId` | Get user's role assignments | Yes | `roles.read` |
+
+---
+
+## Billing Endpoints
+
+### Base Path: `/api/v1/organizations/:orgId/billing`
+
+#### Subscription Management
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/subscription` | Get current subscription | Yes | `billing.read` |
+| POST | `/subscription` | Create subscription | Yes | `billing.manage` |
+| PATCH | `/subscription` | Update subscription (upgrade/downgrade) | Yes | `billing.manage` |
+| DELETE | `/subscription` | Cancel subscription | Yes | `billing.manage` |
+| POST | `/subscription/reactivate` | Reactivate cancelled subscription | Yes | `billing.manage` |
+| POST | `/subscription/preview-change` | Preview subscription change | Yes | `billing.read` |
+
+#### Payment Methods
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/payment-methods` | List payment methods | Yes | `billing.read` |
+| POST | `/payment-methods` | Add payment method | Yes | `billing.manage` |
+| PATCH | `/payment-methods/:paymentMethodId` | Update payment method | Yes | `billing.manage` |
+| DELETE | `/payment-methods/:paymentMethodId` | Remove payment method | Yes | `billing.manage` |
+| POST | `/payment-methods/:paymentMethodId/set-default` | Set default payment method | Yes | `billing.manage` |
+
+#### Invoices
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/invoices` | List invoices | Yes | `billing.read` |
+| GET | `/invoices/:invoiceId` | Get invoice details | Yes | `billing.read` |
+| GET | `/invoices/:invoiceId/pdf` | Download invoice PDF | Yes | `billing.read` |
+| POST | `/invoices/:invoiceId/pay` | Pay invoice manually | Yes | `billing.manage` |
+| GET | `/invoices/upcoming` | Get upcoming invoice | Yes | `billing.read` |
+
+#### Usage & Metering
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/usage` | Get current usage stats | Yes | `billing.read` |
+| GET | `/usage/history` | Get usage history | Yes | `billing.read` |
+| GET | `/usage/export` | Export usage data | Yes | `billing.read` |
+
+#### Billing Info
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/info` | Get billing information | Yes | `billing.read` |
+| PATCH | `/info` | Update billing info (email, address) | Yes | `billing.manage` |
+| GET | `/portal` | Get billing portal URL (Stripe) | Yes | `billing.read` |
+
+#### Plans & Pricing
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/plans` | List available plans | No | - |
+| GET | `/plans/:planId` | Get plan details | No | - |
+
+---
+
+## Products Endpoints
+
+### Base Path: `/api/v1/organizations/:orgId/products`
+
+#### Product Management
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | List available products | Yes | `products.read` |
+| GET | `/:productId` | Get product details | Yes | `products.read` |
+| POST | `/:productId/enable` | Enable product for org | Yes | `products.manage` |
+| DELETE | `/:productId/disable` | Disable product | Yes | `products.manage` |
+| GET | `/:productId/settings` | Get product settings | Yes | `products.settings.read` |
+| PATCH | `/:productId/settings` | Update product settings | Yes | `products.settings.update` |
+
+#### Product Members (Product-Specific Access)
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/:productId/members` | List product members | Yes | `products.members.read` |
+| POST | `/:productId/members` | Add members to product | Yes | `products.members.add` |
+| DELETE | `/:productId/members/:userId` | Remove member from product | Yes | `products.members.remove` |
+| GET | `/:productId/members/:userId/permissions` | Get member's product permissions | Yes | `products.members.read` |
+
+#### Product Roles
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/:productId/roles` | List product-specific roles | Yes | `products.roles.read` |
+| POST | `/:productId/roles` | Create product role | Yes | `products.roles.create` |
+| PATCH | `/:productId/roles/:roleId` | Update product role | Yes | `products.roles.update` |
+| DELETE | `/:productId/roles/:roleId` | Delete product role | Yes | `products.roles.delete` |
+
+#### Product Billing (Separate Product Billing)
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/:productId/billing/subscription` | Get product subscription | Yes | `products.billing.read` |
+| POST | `/:productId/billing/subscription` | Subscribe to product | Yes | `products.billing.manage` |
+| DELETE | `/:productId/billing/subscription` | Cancel product subscription | Yes | `products.billing.manage` |
+| GET | `/:productId/billing/usage` | Get product usage | Yes | `products.billing.read` |
+
+---
+
+## Notifications Endpoints
+
+### Base Path: `/api/v1/notifications`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | List user's notifications | Yes | - |
+| GET | `/unread` | List unread notifications | Yes | - |
+| GET | `/:notificationId` | Get notification details | Yes | - |
+| PATCH | `/:notificationId/read` | Mark as read | Yes | - |
+| DELETE | `/:notificationId` | Delete notification | Yes | - |
+| POST | `/mark-all-read` | Mark all as read | Yes | - |
+| DELETE | `/clear-all` | Clear all notifications | Yes | - |
+| GET | `/count` | Get unread count | Yes | - |
+
+### Notification Preferences
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/preferences` | Get notification preferences | Yes | - |
+| PATCH | `/preferences` | Update preferences | Yes | - |
+| GET | `/preferences/:channel` | Get channel preferences | Yes | - |
+| PATCH | `/preferences/:channel` | Update channel preferences | Yes | - |
+
+---
+
+## Audit Logs Endpoints
+
+### Base Path: `/api/v1/organizations/:orgId/audit-logs`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | List audit logs | Yes | `audit.read` |
+| GET | `/:logId` | Get log details | Yes | `audit.read` |
+| GET | `/export` | Export audit logs | Yes | `audit.export` |
+| GET | `/actions` | List all logged action types | Yes | `audit.read` |
+| GET | `/users/:userId` | Get user's audit trail | Yes | `audit.read` |
+| GET | `/resources/:resourceType/:resourceId` | Get resource audit trail | Yes | `audit.read` |
+
+---
+
+## Webhooks Endpoints
+
+### Base Path: `/api/v1/organizations/:orgId/webhooks`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | List webhook endpoints | Yes | `webhooks.read` |
+| POST | `/` | Create webhook endpoint | Yes | `webhooks.create` |
+| GET | `/:webhookId` | Get webhook details | Yes | `webhooks.read` |
+| PATCH | `/:webhookId` | Update webhook | Yes | `webhooks.update` |
+| DELETE | `/:webhookId` | Delete webhook | Yes | `webhooks.delete` |
+| POST | `/:webhookId/test` | Test webhook | Yes | `webhooks.test` |
+| POST | `/:webhookId/rotate-secret` | Rotate webhook secret | Yes | `webhooks.update` |
+| GET | `/:webhookId/deliveries` | List webhook deliveries | Yes | `webhooks.read` |
+| GET | `/:webhookId/deliveries/:deliveryId` | Get delivery details | Yes | `webhooks.read` |
+| POST | `/:webhookId/deliveries/:deliveryId/redeliver` | Redeliver webhook | Yes | `webhooks.manage` |
+
+### Webhook Events
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/events` | List available event types | Yes | `webhooks.read` |
+
+---
+
+## Activity Feed Endpoints
+
+### Base Path: `/api/v1/organizations/:orgId/activity`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | Get organization activity feed | Yes | `activity.read` |
+| GET | `/team/:teamId` | Get team activity feed | Yes | `activity.read` |
+| GET | `/user/:userId` | Get user activity | Yes | `activity.read` |
+
+---
+
+## System/Admin Endpoints
+
+### Base Path: `/api/v1/admin`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/organizations` | List all organizations (admin) | Yes | System Admin |
+| GET | `/organizations/:orgId` | Get org details (admin view) | Yes | System Admin |
+| POST | `/organizations/:orgId/suspend` | Suspend organization | Yes | System Admin |
+| POST | `/organizations/:orgId/activate` | Activate organization | Yes | System Admin |
+| GET | `/users` | List all users | Yes | System Admin |
+| GET | `/users/:userId` | Get user details | Yes | System Admin |
+| POST | `/users/:userId/suspend` | Suspend user | Yes | System Admin |
+| POST | `/users/:userId/impersonate` | Impersonate user | Yes | System Admin |
+| GET | `/stats` | Get platform statistics | Yes | System Admin |
+| GET | `/health` | System health check | Yes | System Admin |
+| GET | `/products` | List all products (registry) | Yes | System Admin |
+| POST | `/products` | Register new product | Yes | System Admin |
+| PATCH | `/products/:productId` | Update product | Yes | System Admin |
+| DELETE | `/products/:productId` | Remove product | Yes | System Admin |
+
+---
+
+## Search Endpoints
+
+### Base Path: `/api/v1/search`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/` | Global search | Yes | - |
+| GET | `/organizations/:orgId` | Search within organization | Yes | `org.read` |
+| GET | `/organizations/:orgId/members` | Search members | Yes | `members.read` |
+| GET | `/organizations/:orgId/teams` | Search teams | Yes | `teams.read` |
+
+---
+
+## Analytics/Reporting Endpoints (Future)
+
+### Base Path: `/api/v1/organizations/:orgId/analytics`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/overview` | Get analytics overview | Yes | `analytics.read` |
+| GET | `/users` | User analytics | Yes | `analytics.read` |
+| GET | `/activity` | Activity analytics | Yes | `analytics.read` |
+| GET | `/billing` | Billing analytics | Yes | `billing.read` |
+| GET | `/custom/:reportId` | Custom report | Yes | `analytics.read` |
+
+---
+
+## Product-Specific Endpoints
+
+### Product Plugin Pattern
+
+Each product gets its own namespace:
+
+#### Base Path: `/api/v1/organizations/:orgId/products/:productSlug`
+
+Example for **Billing Product**:
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/invoices` | List invoices | Yes | `product.billing.invoices.read` |
+| POST | `/invoices` | Create invoice | Yes | `product.billing.invoices.create` |
+| GET | `/invoices/:invoiceId` | Get invoice | Yes | `product.billing.invoices.read` |
+| PATCH | `/invoices/:invoiceId` | Update invoice | Yes | `product.billing.invoices.update` |
+| DELETE | `/invoices/:invoiceId` | Delete invoice | Yes | `product.billing.invoices.delete` |
+| POST | `/invoices/:invoiceId/send` | Send invoice | Yes | `product.billing.invoices.send` |
+| GET | `/customers` | List customers | Yes | `product.billing.customers.read` |
+| POST | `/customers` | Create customer | Yes | `product.billing.customers.create` |
+
+Example for **Analytics Product**:
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| GET | `/events` | List events | Yes | `product.analytics.events.read` |
+| POST | `/events` | Track event | Yes | `product.analytics.events.create` |
+| GET | `/dashboards` | List dashboards | Yes | `product.analytics.dashboards.read` |
+| POST | `/dashboards` | Create dashboard | Yes | `product.analytics.dashboards.create` |
+| GET | `/dashboards/:dashboardId` | Get dashboard | Yes | `product.analytics.dashboards.read` |
+
+---
+
+## Public/Webhook Receiver Endpoints
+
+### External Webhooks (No Auth)
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/webhooks/stripe` | Stripe webhook receiver | Signature verification |
+| POST | `/webhooks/paddle` | Paddle webhook receiver | Signature verification |
+| POST | `/webhooks/sendgrid` | SendGrid webhook (bounces, etc.) | Signature verification |
+
+---
+
+## Real-time/WebSocket Endpoints (Future)
+
+### WebSocket Connections
+
+| Endpoint | Description | Auth Required |
+|----------|-------------|---------------|
+| WS `/ws/notifications` | Real-time notifications | Yes (Token) |
+| WS `/ws/organizations/:orgId/activity` | Real-time activity feed | Yes (Token) |
+| WS `/ws/organizations/:orgId/presence` | User presence | Yes (Token) |
+
+---
+
+## Complete Endpoint Summary by Category
+
+### Authentication: **15 endpoints**
+### Users: **11 endpoints**
+### Organizations: **15 endpoints** (core + settings)
+### Members: **8 endpoints**
+### Invitations: **10 endpoints**
+### Teams: **13 endpoints**
+### Roles & Permissions: **19 endpoints**
+### Billing: **27 endpoints**
+### Products: **19 endpoints**
+### Notifications: **12 endpoints**
+### Audit Logs: **6 endpoints**
+### Webhooks: **12 endpoints**
+### Activity: **3 endpoints**
+### Admin: **14 endpoints**
+### Search: **4 endpoints**
+
+**Total Core Endpoints: ~188**
+
+---
+
+## Query Parameters Standards
+
+### Pagination
+
+```
+GET /api/v1/organizations/:orgId/members?page=2&per_page=50
+GET /api/v1/organizations/:orgId/members?cursor=eyJpZCI6MTIzfQ==&limit=20
+```
+
+**Response**:
+```json
+{
+  "data": [...],
+  "meta": {
+    "current_page": 2,
+    "per_page": 50,
+    "total": 150,
+    "total_pages": 3,
+    "next_cursor": "eyJpZCI6MTIzfQ==",
+    "has_more": true
+  }
+}
+```
+
+### Filtering
+
+```
+GET /api/v1/organizations/:orgId/members?status=active&role=admin
+GET /api/v1/organizations/:orgId/members?filter[status]=active&filter[created_after]=2024-01-01
+```
+
+### Sorting
+
+```
+GET /api/v1/organizations/:orgId/members?sort=-created_at,name
+GET /api/v1/organizations/:orgId/members?order_by=created_at&order=desc
+```
+
+### Field Selection
+
+```
+GET /api/v1/organizations/:orgId/members?fields=id,name,email,role
+```
+
+### Expansion/Embedding
+
+```
+GET /api/v1/organizations/:orgId/teams?expand=members,organization
+GET /api/v1/organizations/:orgId/members?include=user,roles
+```
+
+### Search
+
+```
+GET /api/v1/organizations/:orgId/members?q=john
+GET /api/v1/organizations/:orgId/members?search=john@example.com
+```
+
+### Date Ranges
+
+```
+GET /api/v1/organizations/:orgId/audit-logs?start_date=2024-01-01&end_date=2024-01-31
+GET /api/v1/organizations/:orgId/invoices?created_after=2024-01-01
+```
+
+---
+
+## Request/Response Examples
+
+### Example 1: Create Organization
+
+**Request**:
+```http
+POST /api/v1/organizations
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "name": "Acme Corporation",
+  "slug": "acme-corp",
+  "tier": "pro",
+  "settings": {
+    "timezone": "America/New_York",
+    "locale": "en-US"
+  }
+}
+```
+
+**Response**:
+```json
+{
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "name": "Acme Corporation",
+    "slug": "acme-corp",
+    "tier": "pro",
+    "status": "active",
+    "owner": {
+      "id": "user_123",
+      "email": "owner@acme.com",
+      "display_name": "John Doe"
+    },
+    "settings": {
+      "timezone": "America/New_York",
+      "locale": "en-US"
+    },
+    "created_at": "2024-01-15T10:30:00Z",
+    "updated_at": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+### Example 2: Invite User
+
+**Request**:
+```http
+POST /api/v1/organizations/550e8400-e29b-41d4-a716-446655440000/invitations
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "email": "jane@example.com",
+  "role_id": "role_admin_123",
+  "message": "Welcome to the team!",
+  "teams": ["team_1", "team_2"]
+}
+```
+
+**Response**:
+```json
+{
+  "data": {
+    "id": "inv_789",
+    "organization_id": "550e8400-e29b-41d4-a716-446655440000",
+    "email": "jane@example.com",
+    "role": {
+      "id": "role_admin_123",
+      "name": "Admin"
+    },
+    "status": "pending",
+    "invited_by": {
+      "id": "user_123",
+      "display_name": "John Doe"
+    },
+    "expires_at": "2024-01-22T10:30:00Z",
+    "created_at": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+### Example 3: Update Member Role
+
+**Request**:
+```http
+PATCH /api/v1/organizations/550e8400-e29b-41d4-a716-446655440000/members/user_456
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "role_id": "role_member_123",
+  "status": "active"
+}
+```
+
+**Response**:
+```json
+{
+  "data": {
+    "id": "member_789",
+    "user": {
+      "id": "user_456",
+      "email": "jane@example.com",
+      "display_name": "Jane Smith"
+    },
+    "role": {
+      "id": "role_member_123",
+      "name": "Member"
+    },
+    "status": "active",
+    "joined_at": "2024-01-10T08:00:00Z",
+    "updated_at": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+### Example 4: List with Filters
+
+**Request**:
+```http
+GET /api/v1/organizations/550e8400-e29b-41d4-a716-446655440000/audit-logs?action=member.added&start_date=2024-01-01&page=1&per_page=20
+Authorization: Bearer <access_token>
+```
+
+**Response**:
+```json
+{
+  "data": [
+    {
+      "id": "log_001",
+      "action": "member.added",
+      "actor": {
+        "id": "user_123",
+        "display_name": "John Doe"
+      },
+      "resource": {
+        "type": "member",
+        "id": "member_789"
+      },
+      "changes": {
+        "role": "admin",
+        "status": "active"
+      },
+      "ip_address": "192.168.1.1",
+      "user_agent": "Mozilla/5.0...",
+      "timestamp": "2024-01-15T10:30:00Z"
+    }
+  ],
+  "meta": {
+    "current_page": 1,
+    "per_page": 20,
+    "total": 45,
+    "total_pages": 3
+  }
+}
+```
+
+---
+
+## Error Response Format
+
+### Standard Error Response
+
+```json
+{
+  "error": {
+    "code": "PERMISSION_DENIED",
+    "message": "You don't have permission to perform this action",
+    "details": {
+      "required_permission": "members.delete",
+      "user_role": "member"
+    },
+    "request_id": "req_abc123",
+    "timestamp": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+### Validation Error Response
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed",
+    "errors": [
+      {
+        "field": "email",
+        "message": "Invalid email format",
+        "code": "INVALID_FORMAT"
+      },
+      {
+        "field": "role_id",
+        "message": "Role does not exist",
+        "code": "NOT_FOUND"
+      }
+    ],
+    "request_id": "req_abc124"
+  }
+}
+```
+
+### Common Error Codes
+
+| HTTP Status | Error Code | Description |
+|-------------|------------|-------------|
+| 400 | `VALIDATION_ERROR` | Request validation failed |
+| 401 | `UNAUTHORIZED` | Not authenticated |
+| 401 | `TOKEN_EXPIRED` | Access token expired |
+| 401 | `INVALID_TOKEN` | Malformed or invalid token |
+| 403 | `PERMISSION_DENIED` | Insufficient permissions |
+| 403 | `ORGANIZATION_SUSPENDED` | Organization suspended |
+| 404 | `NOT_FOUND` | Resource not found |
+| 409 | `ALREADY_EXISTS` | Resource already exists |
+| 409 | `CONFLICT` | Operation conflicts with current state |
+| 422 | `UNPROCESSABLE_ENTITY` | Business logic validation failed |
+| 429 | `RATE_LIMIT_EXCEEDED` | Too many requests |
+| 500 | `INTERNAL_ERROR` | Internal server error |
+| 503 | `SERVICE_UNAVAILABLE` | Service temporarily unavailable |
+
+---
+
+## Authentication Headers
+
+### Request Headers
+
+```http
+Authorization: Bearer <access_token>
+X-Organization-ID: 550e8400-e29b-41d4-a716-446655440000  # Optional, for context
+X-Request-ID: req_unique_123  # Optional, for tracking
+```
+
+### Response Headers
+
+```http
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 950
+X-RateLimit-Reset: 1640000000
+X-Request-ID: req_unique_123
+```
+
+---
+
+## Bulk Operations Endpoints
+
+### Base Path: `/api/v1/organizations/:orgId/bulk`
+
+| Method | Endpoint | Description | Auth Required | Permission |
+|--------|----------|-------------|---------------|------------|
+| POST | `/members/invite` | Bulk invite users | Yes | `invitations.create` |
+| POST | `/members/update` | Bulk update members | Yes | `members.update` |
+| POST | `/members/remove` | Bulk remove members | Yes | `members.delete` |
+| POST | `/teams/add-members` | Add members to multiple teams | Yes | `teams.members.add` |
+| POST | `/roles/assign` | Bulk assign roles | Yes | `roles.assign` |
+
+**Example Request**:
+```http
+POST /api/v1/organizations/:orgId/bulk/members/invite
+Content-Type: application/json
+
+{
+  "invitations": [
+    {"email": "user1@example.com", "role_id": "role_123"},
+    {"email": "user2@example.com", "role_id": "role_123"},
+    {"email": "user3@example.com", "role_id": "role_456"}
+  ],
+  "send_email": true
+}
+```
+
+**Response**:
+```json
+{
+  "data": {
+    "successful": 2,
+    "failed": 1,
+    "results": [
+      {
+        "email": "user1@example.com",
+        "status": "success",
+        "invitation_id": "inv_001"
+      },
+      {
+        "email": "user2@example.com",
+        "status": "success",
+        "invitation_id": "inv_002"
+      },
+      {
+        "email": "user3@example.com",
+        "status": "failed",
+        "error": "User already member"
+      }
+    ]
+  }
+}
+```
+
+---
+
+This comprehensive endpoint specification covers all aspects of your multi-tenant SaaS platform. The total comes to **~200+ endpoints** including product-specific routes, providing complete CRUD operations, advanced filtering, bulk operations, and real-time capabilities.
