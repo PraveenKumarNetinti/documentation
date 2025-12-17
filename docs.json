@@ -68,7 +68,10 @@
             "group": "Guide",
             "pages": [
               "v1/index",
-              "v1/phase-1"
+              "v1/phase-1",
+              "v1/phase-2",
+              "v1/phase-3",
+              "v1/phase-4"
             ]
           }
         ]
