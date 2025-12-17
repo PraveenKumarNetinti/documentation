@@ -11,52 +11,64 @@
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "v0",
         "groups": [
           {
             "group": "Getting started",
             "pages": [
-              "index",
-              "folder-structure",
-              "endpoints"
+              "v0/index",
+              "v0/folder-structure",
+              "v0/endpoints"
             ]
           },
           {
             "group": "Phase-1",
             "pages": [
-              "phase-1/code-setup"
+              "v0/phase-1/code-setup"
             ]
           },
           {
             "group": "Phase-2",
             "pages": [
-              "phase-2/core-app-model",
-              "phase-2/authentication"
+              "v0/phase-2/core-app-model",
+              "v0/phase-2/authentication"
             ]
           },
           {
             "group": "Phase-3",
             "pages": [
-              "phase-3/organizations",
-              "phase-3/teams"
+              "v0/phase-3/organizations",
+              "v0/phase-3/teams"
             ]
           },
           {
             "group": "Phase-4",
             "pages": [
-              "phase-4/invitations",
-              "phase-4/rbac"
+              "v0/phase-4/invitations",
+              "v0/phase-4/rbac"
             ]
           },
           {
             "group": "Phase-5",
             "pages": [
-              "phase-5/app-structure",
-              "phase-5/audit-logging",
-              "phase-5/notifications",
-              "phase-5/product-registry",
-              "phase-5/webhooks",
-              "phase-5/final-configuration"
+              "v0/phase-5/app-structure",
+              "v0/phase-5/audit-logging",
+              "v0/phase-5/notifications",
+              "v0/phase-5/product-registry",
+              "v0/phase-5/webhooks",
+              "v0/phase-5/final-configuration"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "v1",
+        "groups": [
+          {
+            "group": "Guide",
+            "pages": [
+              "v1/index",
+              "v1/phase-1"
             ]
           }
         ]

@@ -1,0 +1,460 @@
+---
+title: "Summary"
+description: "I'll design a comprehensive, enterprise-grade multi-tenant SaaS architecture that can scale to millions of users while maintaining security, compliance, and extensibility."
+---
+
+## Architecture Philosophy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           DESIGN PRINCIPLES                                      │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  1. Security-First: Zero-trust, defense in depth, least privilege              │
+│  2. Tenant Isolation: Cryptographic + logical isolation                         │
+│  3. Audit Everything: Complete traceability for compliance                      │
+│  4. Extensibility: Plugin architecture for products                             │
+│  5. Performance: Optimized indexes, caching strategies, read replicas           │
+│  6. Resilience: Soft deletes, versioning, eventual consistency support          │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Multi-Tenancy Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         HYBRID MULTI-TENANCY MODEL                               │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   Shared Database + Schema Isolation + Row-Level Security                       │
+│                                                                                  │
+│   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                         │
+│   │   Tier 1    │    │   Tier 2    │    │   Tier 3    │                         │
+│   │  (Starter)  │    │(Professional│    │(Enterprise) │                         │
+│   │             │    │             │    │             │                         │
+│   │  Shared DB  │    │  Shared DB  │    │ Dedicated   │                         │
+│   │  Shared     │    │  Separate   │    │ Database    │                         │
+│   │  Schema     │    │  Schema     │    │ + Schema    │                         │
+│   └─────────────┘    └─────────────┘    └─────────────┘                         │
+│                                                                                  │
+│   Row-Level Security enforced via:                                              │
+│   • Django Middleware (Application Layer)                                        │
+│   • PostgreSQL RLS Policies (Database Layer)                                     │
+│   • Encrypted Tenant Context Token                                               │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## High-Level System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              SYSTEM LAYERS                                       │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌───────────────────────────────────────────────────────────────────────────┐  │
+│  │                         API GATEWAY LAYER                                  │  │
+│  │   Rate Limiting │ WAF │ DDoS Protection │ Request Validation              │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                           │
+│  ┌───────────────────────────────────▼───────────────────────────────────────┐  │
+│  │                      AUTHENTICATION LAYER                                  │  │
+│  │  Password │ OAuth2 │ SAML │ OIDC │ MFA │ Passkeys │ API Keys │ mTLS       │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                           │
+│  ┌───────────────────────────────────▼───────────────────────────────────────┐  │
+│  │                      AUTHORIZATION LAYER                                   │  │
+│  │      RBAC │ ABAC │ Permission Boundaries │ Resource Policies              │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                           │
+│  ┌───────────────────────────────────▼───────────────────────────────────────┐  │
+│  │                      TENANT CONTEXT LAYER                                  │  │
+│  │          Tenant Resolution │ Isolation │ Data Partitioning                │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                           │
+│  ┌───────────────────────────────────▼───────────────────────────────────────┐  │
+│  │                      PRODUCT MODULES LAYER                                 │  │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐         │  │
+│  │  │ Project  │ │ LogBook  │ │  Docs    │ │Workdrive │ │ [Future] │         │  │
+│  │  │ Manager  │ │          │ │ Builder  │ │          │ │ Products │         │  │
+│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘         │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                           │
+│  ┌───────────────────────────────────▼───────────────────────────────────────┐  │
+│  │                         DATA LAYER                                         │  │
+│  │  PostgreSQL │ Redis │ Elasticsearch │ S3 │ ClickHouse (Analytics)         │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Phase Breakdown
+
+I've divided the architecture into **10 Phases** for systematic implementation:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          IMPLEMENTATION PHASES                                   │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  PHASE 1: Core Foundation & Base Infrastructure                                 │
+│  ├── Abstract Base Models & Mixins                                              │
+│  ├── Multi-tenancy Foundation                                                   │
+│  ├── Database Configuration & Routing                                           │
+│  └── Core Utilities & Validators                                                │
+│                                                                                  │
+│  PHASE 2: Tenant & Organization Management                                      │
+│  ├── Organization/Tenant Models                                                 │
+│  ├── Subscription & Plans                                                       │
+│  ├── Organization Settings & Preferences                                        │
+│  ├── Organization Hierarchy (Parent/Child)                                      │
+│  └── Billing Integration Points                                                 │
+│                                                                                  │
+│  PHASE 3: User Identity & Profile Management                                    │
+│  ├── Custom User Model                                                          │
+│  ├── User Profiles & Preferences                                                │
+│  ├── Organization Membership                                                    │
+│  ├── Teams & Departments                                                        │
+│  └── User Status & Lifecycle                                                    │
+│                                                                                  │
+│  PHASE 4: Authentication System                                                 │
+│  ├── Password Authentication (Argon2)                                           │
+│  ├── OAuth 2.0 / Social Authentication                                          │
+│  ├── SAML 2.0 SSO                                                               │
+│  ├── OpenID Connect (OIDC)                                                      │
+│  ├── Multi-Factor Authentication (TOTP, SMS, Email, Hardware Keys)             │
+│  ├── Passkeys / WebAuthn / FIDO2                                                │
+│  ├── Magic Links / Passwordless                                                 │
+│  ├── API Keys & Personal Access Tokens                                          │
+│  ├── Service Accounts & Machine-to-Machine                                      │
+│  ├── Session Management & Device Tracking                                       │
+│  ├── mTLS / Certificate-based Auth                                              │
+│  └── Password Policies & Security Rules                                         │
+│                                                                                  │
+│  PHASE 5: Authorization & RBAC/ABAC System                                      │
+│  ├── Permission Registry & Definitions                                          │
+│  ├── System Roles (Predefined)                                                  │
+│  ├── Custom Roles                                                               │
+│  ├── Role Hierarchy & Inheritance                                               │
+│  ├── Role Assignments (Org, Product, Resource Level)                            │
+│  ├── Permission Boundaries & Scopes                                             │
+│  ├── Attribute-Based Conditions (ABAC)                                          │
+│  ├── Resource-Level Policies                                                    │
+│  ├── Permission Delegation                                                      │
+│  └── Temporary/Time-bound Access                                                │
+│                                                                                  │
+│  PHASE 6: Invitation & Onboarding System                                        │
+│  ├── Organization Invitations                                                   │
+│  ├── Bulk Invitations                                                           │
+│  ├── Invitation Policies                                                        │
+│  ├── Domain-based Auto-join                                                     │
+│  ├── Onboarding Workflows                                                       │
+│  └── Access Request System                                                      │
+│                                                                                  │
+│  PHASE 7: Product Module System                                                 │
+│  ├── Product Registry                                                           │
+│  ├── Product Enablement per Tenant                                              │
+│  ├── Product Configuration                                                      │
+│  ├── Product-Level Permissions                                                  │
+│  ├── Feature Flags & Toggles                                                    │
+│  ├── Cross-Product Dependencies                                                 │
+│  └── Product Versioning                                                         │
+│                                                                                  │
+│  PHASE 8: Security, Audit & Compliance                                          │
+│  ├── Comprehensive Audit Logging                                                │
+│  ├── Security Event Tracking                                                    │
+│  ├── Login/Access History                                                       │
+│  ├── Data Classification & Sensitivity                                          │
+│  ├── Compliance Frameworks (SOC2, GDPR, HIPAA)                                  │
+│  ├── Data Retention Policies                                                    │
+│  ├── Privacy Controls & Consent Management                                      │
+│  ├── Encryption Key Management                                                  │
+│  └── Threat Detection Rules                                                     │
+│                                                                                  │
+│  PHASE 9: Notifications, Webhooks & Integrations                                │
+│  ├── Notification System                                                        │
+│  ├── Webhook Subscriptions                                                      │
+│  ├── External OAuth Applications                                                │
+│  ├── Integration Connectors                                                     │
+│  └── Event Bus Configuration                                                    │
+│                                                                                  │
+│  PHASE 10: Product-Specific Models                                              │
+│  ├── 10A: Project Management                                                    │
+│  ├── 10B: LogBook / Time Tracking                                               │
+│  ├── 10C: Documentation Builder                                                 │
+│  ├── 10D: Workdrive / File Management                                           │
+│  └── 10E: Extensibility for Future Products                                     │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Entity Relationship Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    HIGH-LEVEL ENTITY RELATIONSHIPS                               │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│                              ┌──────────────┐                                    │
+│                              │   Plan/Tier  │                                    │
+│                              └──────┬───────┘                                    │
+│                                     │                                            │
+│                              ┌──────▼───────┐         ┌──────────────┐          │
+│                              │ Organization │─────────│   Settings   │          │
+│                              │   (Tenant)   │         └──────────────┘          │
+│                              └──────┬───────┘                                    │
+│           ┌──────────────┬─────────┼─────────┬───────────────┐                  │
+│           │              │         │         │               │                  │
+│           ▼              ▼         ▼         ▼               ▼                  │
+│   ┌──────────────┐ ┌──────────┐ ┌─────┐ ┌─────────┐ ┌──────────────┐           │
+│   │  Membership  │ │  Teams   │ │Roles│ │Products │ │  Invitations │           │
+│   └──────┬───────┘ └────┬─────┘ └──┬──┘ │ Enabled │ └──────────────┘           │
+│          │              │          │    └────┬────┘                             │
+│          │              │          │         │                                   │
+│          ▼              ▼          ▼         ▼                                   │
+│   ┌──────────────┐ ┌──────────┐ ┌─────────────────┐                             │
+│   │     User     │ │  Team    │ │ Role Assignment │                             │
+│   │              │ │ Members  │ │ (Org + Product) │                             │
+│   └──────┬───────┘ └──────────┘ └─────────────────┘                             │
+│          │                                                                       │
+│    ┌─────┴─────┬────────────┬─────────────┬──────────────┐                      │
+│    │           │            │             │              │                      │
+│    ▼           ▼            ▼             ▼              ▼                      │
+│ ┌───────┐ ┌────────┐ ┌──────────┐ ┌────────────┐ ┌─────────────┐               │
+│ │ Auth  │ │Sessions│ │   MFA    │ │  API Keys  │ │   Passkeys  │               │
+│ │Methods│ │/Devices│ │ Configs  │ │            │ │             │               │
+│ └───────┘ └────────┘ └──────────┘ └────────────┘ └─────────────┘               │
+│                                                                                  │
+│                         PRODUCT MODULES                                          │
+│    ┌────────────────────────────────────────────────────────────┐               │
+│    │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐      │               │
+│    │  │ Project  │ │ LogBook  │ │   Docs   │ │Workdrive │      │               │
+│    │  │ Mgmt     │ │          │ │ Builder  │ │          │      │               │
+│    │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘      │               │
+│    │       │            │            │            │             │               │
+│    │       └────────────┴─────┬──────┴────────────┘             │               │
+│    │                          │                                  │               │
+│    │                    ┌─────▼─────┐                           │               │
+│    │                    │  Shared   │                           │               │
+│    │                    │ Resources │                           │               │
+│    │                    │  (Files,  │                           │               │
+│    │                    │ Comments, │                           │               │
+│    │                    │   Tags)   │                           │               │
+│    │                    └───────────┘                           │               │
+│    └────────────────────────────────────────────────────────────┘               │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Django Project Structure
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         PROJECT STRUCTURE                                        │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  saas_platform/                                                                  │
+│  ├── config/                      # Project configuration                        │
+│  │   ├── settings/                                                               │
+│  │   │   ├── base.py              # Base settings                               │
+│  │   │   ├── development.py                                                      │
+│  │   │   ├── staging.py                                                          │
+│  │   │   ├── production.py                                                       │
+│  │   │   └── testing.py                                                          │
+│  │   ├── urls.py                                                                 │
+│  │   ├── wsgi.py                                                                 │
+│  │   └── asgi.py                                                                 │
+│  │                                                                               │
+│  ├── core/                        # PHASE 1: Core Foundation                    │
+│  │   ├── models/                                                                 │
+│  │   │   ├── base.py              # Abstract base models                        │
+│  │   │   ├── mixins.py            # Reusable model mixins                       │
+│  │   │   └── managers.py          # Custom managers                             │
+│  │   ├── middleware/                                                             │
+│  │   │   ├── tenant.py            # Tenant context middleware                   │
+│  │   │   ├── security.py          # Security headers                            │
+│  │   │   └── audit.py             # Request auditing                            │
+│  │   ├── db/                                                                     │
+│  │   │   ├── routers.py           # Database routing                            │
+│  │   │   └── backends.py          # Custom DB backends                          │
+│  │   ├── validators/                                                             │
+│  │   ├── exceptions/                                                             │
+│  │   └── utils/                                                                  │
+│  │                                                                               │
+│  ├── tenants/                     # PHASE 2: Tenant Management                  │
+│  │   ├── models/                                                                 │
+│  │   │   ├── organization.py                                                     │
+│  │   │   ├── subscription.py                                                     │
+│  │   │   ├── settings.py                                                         │
+│  │   │   └── domain.py                                                           │
+│  │   └── ...                                                                     │
+│  │                                                                               │
+│  ├── users/                       # PHASE 3: User Identity                      │
+│  │   ├── models/                                                                 │
+│  │   │   ├── user.py                                                             │
+│  │   │   ├── profile.py                                                          │
+│  │   │   ├── membership.py                                                       │
+│  │   │   └── team.py                                                             │
+│  │   └── ...                                                                     │
+│  │                                                                               │
+│  ├── authentication/              # PHASE 4: Authentication                     │
+│  │   ├── models/                                                                 │
+│  │   │   ├── session.py                                                          │
+│  │   │   ├── mfa.py                                                              │
+│  │   │   ├── passkey.py                                                          │
+│  │   │   ├── oauth.py                                                            │
+│  │   │   ├── saml.py                                                             │
+│  │   │   ├── api_key.py                                                          │
+│  │   │   └── password_policy.py                                                  │
+│  │   ├── backends/                                                               │
+│  │   └── ...                                                                     │
+│  │                                                                               │
+│  ├── authorization/               # PHASE 5: Authorization & RBAC              │
+│  │   ├── models/                                                                 │
+│  │   │   ├── permission.py                                                       │
+│  │   │   ├── role.py                                                             │
+│  │   │   ├── assignment.py                                                       │
+│  │   │   ├── policy.py                                                           │
+│  │   │   └── boundary.py                                                         │
+│  │   ├── engine/                  # Permission evaluation engine                │
+│  │   └── ...                                                                     │
+│  │                                                                               │
+│  ├── invitations/                 # PHASE 6: Invitations                        │
+│  │   ├── models/                                                                 │
+│  │   │   ├── invitation.py                                                       │
+│  │   │   ├── access_request.py                                                   │
+│  │   │   └── domain_policy.py                                                    │
+│  │   └── ...                                                                     │
+│  │                                                                               │
+│  ├── products/                    # PHASE 7: Product Module System              │
+│  │   ├── models/                                                                 │
+│  │   │   ├── registry.py                                                         │
+│  │   │   ├── enablement.py                                                       │
+│  │   │   ├── feature_flag.py                                                     │
+│  │   │   └── configuration.py                                                    │
+│  │   └── ...                                                                     │
+│  │                                                                               │
+│  ├── audit/                       # PHASE 8: Security & Compliance              │
+│  │   ├── models/                                                                 │
+│  │   │   ├── audit_log.py                                                        │
+│  │   │   ├── security_event.py                                                   │
+│  │   │   ├── compliance.py                                                       │
+│  │   │   └── data_retention.py                                                   │
+│  │   └── ...                                                                     │
+│  │                                                                               │
+│  ├── notifications/               # PHASE 9: Notifications & Webhooks          │
+│  │   ├── models/                                                                 │
+│  │   │   ├── notification.py                                                     │
+│  │   │   ├── webhook.py                                                          │
+│  │   │   └── integration.py                                                      │
+│  │   └── ...                                                                     │
+│  │                                                                               │
+│  ├── products_modules/            # PHASE 10: Product-Specific                  │
+│  │   ├── project_management/                                                     │
+│  │   │   ├── models/                                                             │
+│  │   │   └── ...                                                                 │
+│  │   ├── logbook/                                                                │
+│  │   │   ├── models/                                                             │
+│  │   │   └── ...                                                                 │
+│  │   ├── docs_builder/                                                           │
+│  │   │   ├── models/                                                             │
+│  │   │   └── ...                                                                 │
+│  │   └── workdrive/                                                              │
+│  │       ├── models/                                                             │
+│  │       └── ...                                                                 │
+│  │                                                                               │
+│  └── shared/                      # Shared across products                      │
+│      ├── models/                                                                 │
+│      │   ├── comment.py                                                          │
+│      │   ├── attachment.py                                                       │
+│      │   ├── tag.py                                                              │
+│      │   └── activity.py                                                         │
+│      └── ...                                                                     │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Key Model Counts per Phase
+
+| Phase | Description | Estimated Models |
+|-------|-------------|------------------|
+| 1 | Core Foundation | 5-8 (Abstract/Mixins) |
+| 2 | Tenant Management | 8-12 |
+| 3 | User Identity | 10-15 |
+| 4 | Authentication | 15-20 |
+| 5 | Authorization/RBAC | 12-18 |
+| 6 | Invitations | 5-8 |
+| 7 | Product System | 8-12 |
+| 8 | Security/Audit | 10-15 |
+| 9 | Notifications/Webhooks | 8-12 |
+| 10A | Project Management | 15-20 |
+| 10B | LogBook | 8-12 |
+| 10C | Docs Builder | 12-18 |
+| 10D | Workdrive | 12-18 |
+
+**Total: ~130-180 Models**
+
+---
+
+## Technology Stack Recommendations
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          TECHNOLOGY STACK                                        │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  Backend Framework:        Django 5.x + Django REST Framework                   │
+│  Database (Primary):       PostgreSQL 16+ (with partitioning)                   │
+│  Database (Analytics):     ClickHouse / TimescaleDB                             │
+│  Cache:                    Redis Cluster (with Redis Sentinel)                   │
+│  Search:                   Elasticsearch / OpenSearch                            │
+│  Message Queue:            Celery + Redis / RabbitMQ                             │
+│  Object Storage:           S3 / MinIO (self-hosted option)                       │
+│  Session Store:            Redis with encryption                                 │
+│                                                                                  │
+│  Security Libraries:                                                             │
+│  ├── django-axes (brute force protection)                                        │
+│  ├── django-csp (Content Security Policy)                                        │
+│  ├── python-jose (JWT handling)                                                  │
+│  ├── passkeys/py_webauthn (WebAuthn)                                             │
+│  ├── python3-saml (SAML SSO)                                                     │
+│  ├── cryptography (encryption)                                                   │
+│  └── argon2-cffi (password hashing)                                              │
+│                                                                                  │
+│  Observability:                                                                  │
+│  ├── OpenTelemetry (distributed tracing)                                         │
+│  ├── Prometheus + Grafana (metrics)                                              │
+│  └── Sentry (error tracking)                                                     │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Next Steps
+
+Please confirm if this phase breakdown works for you. We can then proceed with:
+
+**→ Phase 1: Core Foundation & Base Infrastructure**
+
+This will include:
+- All abstract base models
+- Mixins (TimestampMixin, SoftDeleteMixin, AuditMixin, etc.)
+- Custom managers with tenant-aware querysets
+- Database configuration
+- Core validators and utilities
+
+---
+
+**Reply with "Proceed with Phase 1" to begin the detailed implementation, or let me know if you'd like any adjustments to the architecture or phase breakdown.**
