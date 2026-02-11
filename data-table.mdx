@@ -1,0 +1,370 @@
+---
+title: "Table Specifications"
+description: "Data Table Theming & Customization Features Catalog"
+---
+
+## Styling & Themes
+
+---
+
+### Theme System
+
+**Purpose**: Support light, dark, and high-contrast visual themes for different environments and preferences.
+
+**User Value**: Accountants often work long hours staring at dense tables — dark mode reduces eye strain. High-contrast mode serves users with visual impairments.
+
+**Considerations**:
+
+- Three themes: Light (default), Dark, High Contrast
+- Theme toggle in global toolbar (sun/moon icon)
+- Respect system preference (prefers-color-scheme) on first load
+- Transition animation between themes (150ms cross-fade to prevent jarring flash)
+- High-contrast theme meets WCAG AAA (7:1 contrast ratio for text, 3:1 for UI components)
+
+### Row Density
+
+Purpose: Adjust row height and padding to show more or fewer rows in the viewport.
+
+**User Value**: Compact mode maximizes visible data (critical for large monitors); comfortable mode improves readability on smaller screens.
+
+**Considerations**:
+
+- Three density levels: Compact (24px rows), Default (32px), Comfortable (48px)
+- Toggle in toolbar (density icon: ☰ with line spacing visual)
+- Font size adjusts proportionally (12px / 13px / 14px)
+- Density change triggers virtualizer re-measurement
+- Cell padding scales: 2px 6px / 4px 8px / 8px
+
+### Per-Column Formatting
+
+**Purpose**: Customize how data is displayed in each column (number format, alignment, etc.).
+
+**User Value**: Accountants need precise control over decimal places, thousands separators, negative number format (parentheses vs. minus sign), and date formats.
+
+**Considerations**:
+
+- Right-click column header → "Format column..."
+- Options by data type:
+  - **Numbers**: decimal places (0-6), thousands separator, negative format (-100 vs. (100)), percentage mode
+  - **Currency**: symbol position, currency code display (\$1,234 vs. 1,234 USD vs. USD 1,234)
+  - **Dates**: format pattern (MM/DD/YYYY, DD-MMM-YYYY, YYYY-MM-DD, etc.)
+- Alignment: left / center / right (numbers default right-aligned)
+- Conditional formatting (see 6.4)
+- Format preview shown in dialog before applying
+
+### Conditional Formatting
+
+**Purpose**: Apply visual styling rules based on cell values (colors, icons, data bars).
+
+**User Value**: Instantly identify negative balances (red), large variances (bold), or overdue items (highlighted) without reading every number.
+
+**Considerations**:
+
+- Rules engine in Column Settings:
+  - Color scale (gradient from green to red based on value range)
+  - Threshold rules: "If value \< 0, text color = red"
+  - Icon sets: ▲▼ arrows for positive/negative, ● dots for status categories
+  - Data bars: horizontal bar within cell proportional to value (like Excel)
+- Up to 5 rules per column
+- Rules evaluated top-to-bottom, first match wins (or "apply all" mode)
+- Preview before applying
+
+### Zebra Striping & Grid Lines
+
+**Purpose**: Visual options for row differentiation and cell boundary clarity.
+
+**User Value**: Dense numeric tables need visual guides to track across columns — zebra striping and grid lines prevent misreading rows.
+
+**Considerations**:
+
+- Toggle: Zebra stripes on/off (alternating row backgrounds)
+- Toggle: Vertical grid lines on/off (horizontal always on for readability)
+- Column highlight on hover (entire column gets subtle background — helps track column values)
+- "Crosshair" mode: highlight both the row and column of the hovered cell
+
+## Table Navigation & Row Actions
+
+---
+
+### "Go to Row" Jump Control
+
+**Purpose**: Instantly navigate to a specific row by number or primary key (e.g., Transaction ID, Journal Entry #).
+
+**User Value**: Accountants frequently reference specific line items during audits or reconciliation. Scrolling through 500K+ rows is infeasible.
+
+**Considerations**:
+
+- Input field in TableToolbar with typeahead supporting both row index and business key lookup
+- Show row context preview (surrounding 2–3 rows) before jumping so users confirm they're targeting the right record
+- Support range input (e.g., "1500-1520") to jump and auto-select a range
+- Animate scroll to destination (brief 150ms ease) so users perceive spatial movement, but offer "instant jump" in preferences for power users
+- Maintain focus on the target row after jump for keyboard continuity
+
+### Quick Row Search (Find-in-Table)
+
+**Purpose**: Ctrl+F-style search across all visible columns to locate rows matching a text query.
+
+**User Value**: Analysts searching for a vendor name, memo text, or specific dollar amount across the entire table without knowing which column contains the data.
+
+**Considerations**:
+
+- Floating search bar (like browser find) with match count ("3 of 147 matches"), prev/next navigation
+- Highlight matching cells with background color (yellow) and scroll to first match
+- Option to "filter to matches only" (narrows the table) vs. "highlight only" (keeps all rows visible)
+- Search should work across formatted display values (e.g., "\$1,234.56" matches "1234")
+- Escape dismisses, but last search term persists in session
+
+### Minimap / Scroll Position Indicator
+
+**Purpose**: Visual overview of position within the dataset, similar to code editor minimaps.
+
+**User Value**: In 100K+ row tables, the scrollbar thumb becomes tiny and imprecise. A minimap provides spatial context showing where bookmarks, highlighted rows, and search matches exist relative to current viewport.
+
+**Considerations**:
+
+- Narrow vertical strip (12px wide) alongside the scrollbar
+- Color-coded markers: bookmarks (blue dots), search matches (yellow), grouped section boundaries (gray lines), current selection (green)
+- Click on minimap to jump to that position
+- Can be hidden for minimal UI preference
+
+## Column Customization
+
+---
+
+### Column Visibility Management
+
+**Purpose**: Show/hide columns to reduce visual noise and focus on relevant data.
+
+**User Value**: Financial tables often have 40+ columns (debit, credit, running balance, multiple tax fields, department codes, etc.). Users need different column subsets for different tasks (reconciliation vs. reporting vs. audit).
+
+**Considerations**:
+
+- Checklist in a Column Settings side panel with drag-to-reorder
+- "Select All / None" and quick filter to find column names
+- Show column data type icon (Σ numeric, Aa text) for quick identification
+- Minimum 1 column must remain visible (prevent empty table state)
+- Column count indicator in toolbar: "Showing 12 of 38 columns"
+- Right-click column header → "Hide this column" for quick individual hiding
+
+### Column Reordering
+
+**Purpose**: Arrange columns in the order that matches the user's workflow.
+
+**User Value**: Default column order rarely matches individual workflow. An AP clerk wants vendor name first; an auditor wants GL code first.
+
+**Considerations**:
+
+- Drag-and-drop in column headers (with clear drag handle affordance)
+- Also reorderable in Column Settings side panel list (for non-mouse users)
+- Keyboard reorder: Ctrl+Shift+Arrow in column header focus
+- Visual drop indicator (blue line between columns during drag)
+- Pinned columns maintain their pin zone during reorder (can't drag a pinned-left column to the scrollable zone without unpinning)
+
+### Column Pinning (Freeze Columns)
+
+**Purpose**: Keep critical columns visible while horizontally scrolling through the remaining data.
+
+**User Value**: Account number and name should always be visible while scrolling to view period columns or memo fields.
+
+**Considerations**:
+
+- Support left-pin and right-pin (right-pin useful for totals/status columns)
+- Visual separator line (shadow/border) between pinned and scrollable zones
+- Maximum pin limit (e.g., 6 columns per side) to prevent over-pinning
+- Right-click header → "Pin to left / Pin to right / Unpin"
+- Pin icon indicator in header
+
+### Column Grouping (Header Groups)
+
+**Purpose**: Visually organize related columns under a parent header.
+
+**User Value**: Financial tables often have Q1/Q2/Q3/Q4 columns, or Debit/Credit sub-columns under each department — hierarchical headers make this scannable.
+
+**Considerations**:
+
+- Multi-level header rows (up to 3 levels deep)
+- Collapsible column groups (click group header to toggle showing/hiding child columns)
+- Visual nesting with alternating header background shades
+- Group collapse state persisted in view preferences
+
+## Column Sizing & Scrolling
+
+---
+
+### Column Resizing
+
+**Purpose**: Manually adjust column widths by dragging header borders.
+
+**User Value**: Auto-sized columns can't anticipate every user's needs — some want a wider "Description" column, others want it narrow because they never read it.
+
+**Considerations**:
+
+- Resize handle on right edge of each column header (visible on hover, 6px grab zone)
+- Double-click resize handle = auto-fit to content (scans visible rows)
+- Minimum width: 40px (prevents accidental collapse to 0)
+- Maximum width: 800px (prevents runaway expansion)
+- Resize cursor (col-resize) as affordance
+- Show width tooltip during drag ("240px")
+- "Reset all widths" option in Column Settings
+
+### Auto-Fit Modes
+
+**Purpose**: Automatically size columns to content or distribute available width.
+
+**User Value**: Quick way to optimize table layout without manual resizing each column.
+
+**Considerations**:
+
+- Three modes available from Column Settings:
+  - Fit to Content: Each column sized to longest visible value (+ header text)
+  - Fit to Page: Columns stretch proportionally to fill viewport width (no horizontal scroll)
+  - Fixed: All columns use a uniform width (user-specified)
+- Per-column override: any column can be manually resized after auto-fit
+- "Fit to Content" should sample visible rows + first/last 100 rows (not full dataset — too slow for 1M rows)
+
+### Virtualized Rendering
+
+**Purpose**: Render only visible rows and columns to maintain 60fps performance with massive datasets.
+
+**User Value**: Transparent to users — they simply experience a fast, responsive table regardless of data size.
+
+**Considerations**:
+
+- Scrollbar should accurately represent total dataset size (not just rendered rows)
+- No visible pop-in or flickering during fast scrolling
+- "Overscan" buffer (render 20 extra rows above/below viewport) to prevent blank flashes
+- Consider showing a loading shimmer for extremely fast scroll (scroll velocity \> threshold)
+- Row height: fixed preferred for performance; if variable, pre-measure or estimate
+
+### Horizontal Scroll via Keyboard & Shift+Scroll
+
+**Purpose**: Allow horizontal navigation without a horizontal scrollbar click.
+
+**User Value**: Accountants on laptops without mice need efficient horizontal traversal. Horizontal scrollbar is often tiny and hard to target.
+
+**Considerations**:
+
+- Shift+MouseWheel = horizontal scroll (standard UX convention)
+- Arrow keys when focused on a cell navigate cell-by-cell (including horizontally)
+- Tab/Shift+Tab moves through focusable cells in reading order
+- When a cell is focused via keyboard, auto-scroll to bring it into view (both axes)
+
+Optional: bottom horizontal scrollbar made thicker (12px) for easier targeting
+
+## Sorting & Filtering
+
+---
+
+### Multi-Column Sorting
+
+**Purpose**: Sort data by multiple columns in priority order.
+
+**User Value**: "Sort by Account Type ascending, then by Date descending, then by Amount descending" — essential for financial data analysis.
+
+**Considerations**:
+
+- Click column header = single-column sort (toggles asc → desc → none)
+- Shift+Click = add column to multi-sort stack
+- Sort priority numbers displayed in header (①, ②, ③)
+- Sort indicator arrows (▲▼) in headers
+- "Clear all sorts" button in toolbar when any sort is active
+- Sort configuration also available in dedicated sort panel (for keyboard users and complex sorts)
+- Stable sort guarantee: rows with equal values maintain their original relative order
+
+### Column-Specific Filtering
+
+**Purpose**: Filter rows based on column values with type-appropriate filter controls.
+
+**User Value**: "Show me only Expense accounts with amounts \> \$10,000 in Q3 2024" — complex filtering is daily work for analysts.
+
+**Considerations**:
+
+- Filter icon in each column header; clicking opens a filter popover anchored to that column
+- Filter type adapts to column data type:
+  - **Text**: contains / equals / starts with / regex + quick-select checklist of unique values
+  - **Numeric/Currency**: equals / greater than / less than / between / top N / bottom N
+  - **Date**: exact date / date range picker / relative (last 30 days, this quarter, YTD)
+  - **Enum/Category**: multi-select checklist with search
+- Active filters shown as dismissible chips in toolbar: [Account Type: Expense ×] [Amount: \> \$10K ×]
+- Compound filters: AND within same column, AND/OR between columns (advanced mode)
+- Filter count badge on column header when active
+
+### Saved Filter Presets
+
+**Purpose**: Save and recall named filter configurations.
+
+**User Value**: Accountants run the same analyses repeatedly (month-end review, audit prep, reconciliation). Rebuilding complex filters each time is wasteful.
+
+**Considerations**:
+
+- "Save current filters as..." option → name input dialog
+- Dropdown of saved presets in filter area
+- Edit/rename/delete saved presets
+- Share presets with team members (if collaboration features exist)
+- System presets for common accounting scenarios (e.g., "Unreconciled Items," "High-Value Transactions")
+
+### Quick Column Filters (Inline Header Filters)
+
+**Purpose**: Persistent filter row directly below the header for rapid, always-visible filtering.
+
+**User Value**: Power users (most accountants) prefer an always-visible filter row rather than opening popovers — similar to Excel's filter row.
+
+**Considerations**:
+
+- Optional secondary header row with compact filter inputs per column
+- Toggled on/off via toolbar button ("Show filter row")
+- Text columns: simple text input with implicit "contains"
+- Numeric: comparison operator dropdown + number input
+- Date: compact date range picker
+- Must not interfere with column resize or sort click targets
+
+## Grouping & Summaries
+
+---
+
+### Row Grouping
+
+**Purpose**: Group rows by one or more column values, creating a hierarchical tree structure.
+
+**User Value**: "Group all transactions by Account Type, then by Department" — fundamental for financial review and reporting.
+
+**Considerations**:
+
+- Drag column header to a "group zone" drop area above the table
+- Or right-click header → "Group by this column"
+- Multi-level grouping (up to 4 levels to prevent performance degradation)
+- Group rows show: group value, row count, and aggregate values
+- Expand/collapse individual groups; "Expand All / Collapse All" buttons
+- Indentation for nested groups (16px per level)
+- Group row visually distinct (bold text, subtle background, expand/collapse chevron)
+- When grouped, original row numbers shown alongside group-relative indices
+
+### Aggregate / Summary Rows
+
+**Purpose**: Display computed aggregates (sum, average, count, min, max) at group level and table footer.
+
+**User Value**: "What's the total debits for the Expense group?" — eliminates the need to export to Excel for basic summarization.
+
+**Considerations**:
+
+- Per-column aggregate function selector (right-click column header → "Summarize: Sum / Avg / Count / Min / Max / None")
+- Aggregates shown in:
+  - Group rows (when grouping is active)
+  - Sticky footer row (always, for full table)
+  - Status bar for selected rows (selection-scoped aggregates)
+- Formatted with same column formatting (currency, decimals, etc.)
+- Weighted average option for financial calculations
+- Aggregate values visually distinguished (bold, slightly different background)
+
+### Subtotal Rows (Inline Subtotals)
+
+**Purpose**: Insert subtotal rows at natural breakpoints (e.g., after each account category) without full grouping.
+
+**User Value**: Mimics traditional accounting report formats (trial balance, income statement) where subtotals appear inline.
+
+**Considerations**:
+
+- "Insert subtotals by [column]" option adds subtotal rows after each distinct value change in a sorted column
+- Subtotal row spans the full width, shows aggregates for numeric columns
+- Visually styled as a separator row (heavier border, bold text, light background)
+- Can be enabled alongside sorting (sort by the subtotal column first, then enable subtotals)
